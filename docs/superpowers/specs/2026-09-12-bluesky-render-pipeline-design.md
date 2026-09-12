@@ -32,6 +32,8 @@ Made in the design conversation. Each one closes a fork.
 | Bucket type | `TIMESTAMPTZ` in DuckDB and Postgres. | Naive `TIMESTAMP` as in the sql-flow example: its cast on write depends on the container's timezone. |
 | Postgres URI default | None. The variable is required. | A localhost default: a misconfigured Render worker would fail late and unclearly. |
 | sqlflow version | `turbolytics/sql-flow:v1.2.0`, pinned in the Dockerfile. | `latest`: a sql-flow release could change the config schema under the demo. |
+| Where the aggregation happens | In sqlflow's tumbling window. | A Postgres trigger accumulating per batch. It works, but it moves the aggregation out of sqlflow and the demo then shows sqlflow as a buffer rather than a stream processor. It also costs 4.2x the writes, measured: 133 row-writes per minute against 32, and 74% of them updates. |
+| Every insert lists `updated_at` | Yes, with `now()` in the select list. | Relying on the column's `DEFAULT now()`. The DuckDB Postgres extension routes non-conflicting rows through a bulk `COPY`, and that `COPY` supplies an explicit `NULL` for any column absent from the insert's column list. An explicit `NULL` defeats the default, so the `NOT NULL` fails on exactly the new rows. |
 
 ## Data flow
 
@@ -49,6 +51,38 @@ Made in the design conversation. Each one closes a fork.
 
 The Postgres write happens before the delete, so a crash between the two
 republishes the window. The upsert on `(bucket, lang)` absorbs the duplicate.
+
+### The write path, and one trap in it
+
+The DuckDB Postgres extension honours `ON CONFLICT` against an attached table
+when that table has a primary key. Verified on DuckDB v1.5.2, the version the
+pinned image carries: a multi-row batch mixing new and conflicting keys applies
+whole, and republishing the identical batch leaves every value unchanged.
+
+The trap is not the conflict clause. The extension routes non-conflicting rows
+through a bulk `COPY`, and that `COPY` supplies an explicit `NULL` for any
+column the insert's column list omits. An explicit `NULL` defeats the column's
+`DEFAULT`, so `updated_at TIMESTAMPTZ NOT NULL DEFAULT now()` fails on exactly
+the rows being inserted for the first time:
+
+```
+ERROR:  null value in column "updated_at" violates not-null constraint
+DETAIL:  Failing row contains (2026-09-12 12:00:00+00, ja, 7, null)
+CONTEXT:  COPY t_conflict, line 1
+```
+
+Two consequences for this design:
+
+- Every insert lists `updated_at` explicitly and selects `now()` for it.
+  Adding a default is not a fix, because the default is never reached.
+- A single-row batch whose one row conflicts takes the update path and never
+  touches `COPY`, so it does not reproduce the failure. Only a batch carrying
+  at least one new key does, and a real window batch nearly always does.
+
+Two further extension limits, neither of which binds here: a unique index in
+place of a primary key fails with a binder error, and two rows sharing a key
+inside one statement collapse to one row rather than raising. A window batch
+carries one row per key by construction.
 
 ## What a restart loses
 
@@ -103,11 +137,15 @@ Template variables:
 `sqlcommand` sink whose SQL is:
 
 ```sql
-INSERT INTO pg.posts_per_minute_by_lang (bucket, lang, posts)
-SELECT bucket, lang, posts FROM sqlflow_sink_batch
+INSERT INTO pg.posts_per_minute_by_lang (bucket, lang, posts, updated_at)
+SELECT bucket, lang, posts, now() FROM sqlflow_sink_batch
 ON CONFLICT (bucket, lang) DO UPDATE
-  SET posts = EXCLUDED.posts, updated_at = now()
+  SET posts = EXCLUDED.posts, updated_at = EXCLUDED.updated_at
 ```
+
+`updated_at` is in the column list because the extension's `COPY` path would
+otherwise send an explicit `NULL` for it. See "The write path, and one trap in
+it".
 
 `pipeline`: name `bluesky-posts-per-minute-by-lang`, `batch_size: 500`,
 websocket source on `SQLFLOW_JETSTREAM_URI`, `handlers.StructuredBatch` over
@@ -259,10 +297,20 @@ Done before the PR is opened, with the output in the PR description:
 
 1. `make run` logs `applied` for both files, then sqlflow's startup lines.
    `make migrate` in a second terminal logs `skipped` for both files.
-2. Leave `make run` up for at least three minutes.
-3. `SELECT * FROM pipeline_status` returns at least two minutes observed and
-   a `last_write_at` within the last minute.
-4. `SELECT bucket, lang, posts FROM posts_per_minute_by_lang ORDER BY posts DESC LIMIT 5` shows plausible languages, `en` and `ja` among them.
+2. Leave `make run` up for at least five minutes. The first window publishes
+   about two minutes after the minute it covers ends: one minute of window
+   plus the 60-second grace.
+3. **No `poll failed` line appears in the logs.** This is the assertion that
+   catches a broken write path. A rejected flush logs `poll failed` every
+   `poll_interval_seconds` and never exits, so the process looks healthy while
+   publishing nothing. Grep for it rather than trusting that the container is
+   up.
+4. `SELECT * FROM pipeline_status` returns at least two minutes observed and
+   a `last_write_at` within the last two minutes.
+5. `SELECT bucket, lang, posts FROM posts_per_minute_by_lang ORDER BY posts DESC LIMIT 5` shows plausible languages, `en` and `ja` among them.
+6. Re-run the sink's insert by hand against a row already published. It
+   returns without error and changes no value, which is what makes the
+   at-least-once republish survivable.
 
 ## README
 
@@ -277,15 +325,43 @@ Sections, in this order:
    worker does on start.
 6. Environment variables: the two template variables and `SQLFLOW_LOG_LEVEL`.
 7. Delivery semantics and known gaps: at-least-once into Postgres, the
-   in-memory choice, the websocket cursor gap.
+   in-memory choice, the websocket cursor gap, and the manager retry gap
+   below.
 8. What comes next: the demo page, TurboStats.
 
 Written to Google Technical Writing One style as sql-flow's CLAUDE.md
 specifies.
+
+## Upstream gaps this deployment runs on top of
+
+Both belong in sql-flow. Neither blocks this PR, and the README names both.
+
+**A rejected manager flush retries forever and the process stays up.**
+`Tumbling.Start` in `internal/managers/tumbling.go` logs `poll failed` and
+continues to the next tick. Nothing classifies the error, so a permanently
+rejected flush, such as a constraint violation, is retried on every tick with
+no deadline and no exit. The rows stay in the table, the manager never makes
+progress, and the process reports healthy. `Start` returns `error` but only
+ever returns nil, so the caller cannot learn about it either.
+
+Observed directly while building this: a broken insert produced `poll failed`
+every 10 seconds for over three minutes while the container stayed `Up` and
+wrote nothing. The consume loop has an error policy and liveness invariants.
+The manager path has neither and is not a conformance subject.
+
+The fix has three parts: a rejected error on the manager path exits with a
+code, an unreachable one follows the retry ladder with its deadline, and the
+manager becomes a subject in the conformance harness. Until then the
+verification step greps for `poll failed`, because an unhealthy pipeline is
+indistinguishable from a healthy one by liveness alone.
+
+**The websocket source cannot resume.** Covered above in "What a restart
+loses".
 
 ## Out of scope
 
 - The demo page.
 - TurboStats or any process-level metrics.
 - A Jetstream cursor in the websocket source. That is a sql-flow change.
+- Fixing the manager retry path. That is a sql-flow change.
 - Retention or rollup of old minutes.
