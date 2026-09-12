@@ -1,0 +1,30 @@
+# Local development. `docker compose up` runs the same entrypoint as Render:
+# migrate, then run.
+services:
+  postgres:
+    # Matches the Render database's major version.
+    image: postgres:18
+    environment:
+      POSTGRES_USER: bluesky
+      POSTGRES_PASSWORD: bluesky
+      POSTGRES_DB: bluesky
+    # Loopback only, and not 5432: a developer who also runs sql-flow's own dev
+    # stack already has a Postgres there. Override with POSTGRES_HOST_PORT.
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5433}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bluesky -d bluesky"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  sqlflow:
+    build: .
+    # The healthcheck gate is what lets the entrypoint migrate on start without
+    # a retry loop.
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SQLFLOW_POSTGRES_URI: postgresql://bluesky:bluesky@postgres:5432/bluesky
+      SQLFLOW_LOG_LEVEL: INFO

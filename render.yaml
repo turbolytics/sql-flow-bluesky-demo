@@ -1,0 +1,31 @@
+# Render Blueprint: one background worker streaming Jetstream into Postgres.
+#
+# The database is not declared here. It already exists, and a Blueprint entry
+# with a matching name would apply this file's settings to it, including a
+# plan and major version. fromDatabase may reference a database outside the
+# Blueprint as long as it exists in the workspace. To deploy this elsewhere,
+# create a Postgres named sqlflow-demo-rollups in the same region, or change
+# the name below.
+services:
+  - type: worker
+    name: sqlflow-bluesky
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    # 55 MiB resident at steady state, measured locally at ~44 messages/sec.
+    plan: 0.5c-512mb
+    # The database's region. connectionString is the private-network URL,
+    # reachable only from services in the same region. Also the closest region
+    # to jetstream2.us-east.
+    region: virginia
+    # Deploy only after CI passes. CI applies the migrations twice, so a
+    # migration that is not idempotent never reaches the worker's entrypoint.
+    autoDeployTrigger: checksPass
+    envVars:
+      # The private connection string. It never leaves Render and is never
+      # committed.
+      - key: SQLFLOW_POSTGRES_URI
+        fromDatabase:
+          name: sqlflow-demo-rollups
+          property: connectionString
+      - key: SQLFLOW_LOG_LEVEL
+        value: INFO

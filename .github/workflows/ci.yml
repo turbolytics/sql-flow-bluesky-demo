@@ -1,0 +1,79 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  migrations:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        # Matches the Render database's major version.
+        image: postgres:18
+        env:
+          POSTGRES_USER: bluesky
+          POSTGRES_PASSWORD: bluesky
+          POSTGRES_DB: bluesky
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U bluesky -d bluesky"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+    env:
+      SQLFLOW_POSTGRES_URI: postgresql://bluesky:bluesky@localhost:5432/bluesky
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Apply migrations
+        run: bin/migrate.sh | tee first.log
+
+      - name: Every migration applied on the first run
+        run: |
+          if grep -q '^skipped ' first.log; then
+            echo "a migration was skipped on an empty database" >&2
+            exit 1
+          fi
+          grep -q '^applied ' first.log
+
+      - name: Apply migrations again
+        run: bin/migrate.sh | tee second.log
+
+      # The check that matters: a non-idempotent migration passes its first
+      # deploy and crashes the worker on its second.
+      - name: Nothing applied on the second run
+        run: |
+          if grep -q '^applied ' second.log; then
+            echo "a migration applied twice" >&2
+            exit 1
+          fi
+          grep -q '^skipped ' second.log
+
+      - name: The schema is what the demo page reads
+        run: |
+          psql "$SQLFLOW_POSTGRES_URI" -v ON_ERROR_STOP=1 -c "
+            SELECT bucket, lang, posts, updated_at
+            FROM posts_per_minute_by_lang WHERE false"
+          psql "$SQLFLOW_POSTGRES_URI" -v ON_ERROR_STOP=1 -c "
+            SELECT first_bucket, latest_bucket, last_write_at,
+                   minutes_observed, total_posts
+            FROM pipeline_status"
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Catches a config that no longer parses, which is the failure a pinned
+      # image makes rare and a bumped image makes likely.
+      - name: Validate pipeline.yml
+        run: |
+          docker run --rm -v "$PWD/pipeline.yml:/app/pipeline.yml" \
+            turbolytics/sql-flow:v1.2.0 validate /app/pipeline.yml
+
+      # Render builds this Dockerfile on deploy. Building it here keeps a broken
+      # image from passing the checks that gate the deploy.
+      - name: Build the worker image
+        run: docker build -t sqlflow-bluesky-demo .
