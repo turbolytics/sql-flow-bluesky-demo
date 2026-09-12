@@ -10,6 +10,32 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-12-bluesky-render-pipeline-design.md`
 
+## Executed with deviations
+
+This plan was executed on 2026-09-12. Where it and the repository disagree, the
+repository and the spec are authoritative. The plan text below is kept as
+written. Execution changed these details:
+
+- **Postgres 18, not 16.** The Render database, `sqlflow-demo-rollups`, runs
+  PostgreSQL 18. Compose and CI use `postgres:18`.
+- **`render.yaml` declares no database.** The database already existed. A
+  Blueprint entry with its name would apply the file's plan and major version
+  to it. The worker references it through `fromDatabase`.
+- **Render plan names changed.** The worker uses `plan: 0.5c-512mb` in
+  `region: virginia` with `autoDeployTrigger: checksPass`. `starter`,
+  `basic-256mb`, and `autoDeploy` no longer validate against Render's schema.
+- **Compose publishes Postgres on `127.0.0.1:5433`.** sql-flow's own dev stack
+  already holds 5432. `POSTGRES_HOST_PORT` overrides it.
+- **The Makefile has no `SQLFLOW_POSTGRES_URI` default.** Every target runs
+  inside compose, so the host URI was never read. `make migrate` passes `-T`,
+  because compose swallows output under an unattached TTY.
+- **Local tests use the compose network, not `--network host`.** Host
+  networking does not reach the host on Docker Desktop for Mac.
+- **`migrate.sh` creates `schema_migrations` under the advisory lock.**
+  `CREATE TABLE IF NOT EXISTS` races against itself.
+- **CI has an `image` job that also builds the Dockerfile.** Render builds the
+  same file, and CI gates the deploy.
+
 ## Global Constraints
 
 Every task's requirements implicitly include this section.

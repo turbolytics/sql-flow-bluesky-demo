@@ -26,7 +26,7 @@ Made in the design conversation. Each one closes a fork.
 | What is stored | Posts per minute by language. One row per (minute, language). | Raw posts: 50-100 rows/sec fills a small Postgres in days and needs retention logic. |
 | Schema management | Plain SQL files in `migrations/`, applied by a `psql` script that records versions in `schema_migrations`. | golang-migrate: a tool to install for one table. `CREATE TABLE` inside the pipeline config: hides schema changes in the pipeline yaml. |
 | Where migrations run | In the worker's entrypoint, before `sqlflow run`. Every deploy self-provisions. | A separate Render job: a manual step, and a forgotten one crashes the worker. |
-| Hosting | One Render background worker built from the Dockerfile, plus one Render Postgres, declared in `render.yaml`. | Dashboard-only setup: not reproducible for a reader. |
+| Hosting | One Render background worker built from the Dockerfile, declared in `render.yaml`. It connects to the existing Render Postgres `sqlflow-demo-rollups` (PostgreSQL 18, `virginia`) through `fromDatabase`. | Dashboard-only setup: not reproducible for a reader. Declaring the database in the Blueprint: a matching name applies the file's plan and major version to the existing instance. |
 | DuckDB state | In memory. No state path, no disk. | A persistent disk: saves only the 1-2 minutes of counts already in DuckDB at a crash. The downtime gap is lost either way, because the websocket source has no cursor. |
 | Process metrics | None in this PR. Uptime is inferred from missing minute buckets. | TurboStats reporting: waits for the control plane. |
 | Bucket type | `TIMESTAMPTZ` in DuckDB and Postgres. | Naive `TIMESTAMP` as in the sql-flow example: its cast on write depends on the container's timezone. |
@@ -199,7 +199,10 @@ materialize it if it stops being fine.
 Bash. Requires `psql` on the path and `SQLFLOW_POSTGRES_URI` in the
 environment; exits 2 with a one-line message if either is missing. Steps:
 
-1. `CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`.
+1. `CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`,
+   inside a transaction that holds the same advisory lock as step 2.
+   `CREATE TABLE IF NOT EXISTS` is not safe against itself: two concurrent
+   runs can fail on the system catalog's unique index.
 2. For each `migrations/*.sql` in sorted order, with `version` set to the
    filename without extension, run one `psql` session with
    `-v ON_ERROR_STOP=1 -v version=<version>`. The shell substitutes the file
@@ -249,47 +252,69 @@ outbound network on first start. The README says so.
 
 ## render.yaml
 
-One database and one worker, same region:
+One worker. No `databases` block.
 
-- `databases[0]`: name `bluesky-stats`, `plan: basic-256mb`,
-  `postgresMajorVersion: "16"`. Not `free`: Render deletes free databases
-  after 30 days, and this database exists to show uptime.
-- `services[0]`: `type: worker`, name `sqlflow-bluesky`, `runtime: docker`,
-  `dockerfilePath: ./Dockerfile`, `plan: starter`, `autoDeploy: true`.
-  `envVars`: `SQLFLOW_POSTGRES_URI` from `fromDatabase: {name: bluesky-stats,
-  property: connectionString}`, and `SQLFLOW_LOG_LEVEL: INFO`.
+The database already exists: `sqlflow-demo-rollups`, PostgreSQL 18, region
+`virginia`, storage autoscaling disabled. A Blueprint `databases` entry with
+that name would apply the file's plan and major version to the existing
+instance. `fromDatabase` may reference a database outside the Blueprint as
+long as it exists in the workspace, so the worker references it instead.
 
-The internal connection string needs no TLS. A reader who points the pipeline
+`services[0]`:
+
+- `type: worker`, name `sqlflow-bluesky`, `runtime: docker`,
+  `dockerfilePath: ./Dockerfile`.
+- `plan: 0.5c-512mb`, the smallest worker plan. The pipeline holds 55 MiB at
+  steady state. Render renamed its plans; `starter` no longer validates.
+- `region: virginia`, the database's region. `connectionString` is the
+  private-network URL.
+- `autoDeployTrigger: checksPass`. It replaces the deprecated `autoDeploy`.
+  A commit deploys only after CI passes.
+- `envVars`: `SQLFLOW_POSTGRES_URI` from `fromDatabase: {name:
+  sqlflow-demo-rollups, property: connectionString}`, and
+  `SQLFLOW_LOG_LEVEL: INFO`.
+
+The file validates against Render's published schema at
+`https://render.com/schema/render.yaml.json`.
+
+The private connection string needs no TLS. A reader who points the pipeline
 at Render's external URL from a laptop appends `?sslmode=require`. The README
 says so.
 
 ## Local development
 
-`docker-compose.yml` runs two services: `postgres` (`postgres:16`, published
-on `localhost:5432`, user, password, and database all `bluesky`, with a
-`pg_isready` healthcheck) and `sqlflow` (`build: .`, `depends_on` postgres
-healthy, `SQLFLOW_POSTGRES_URI=postgresql://bluesky:bluesky@postgres:5432/bluesky`).
-Starting compose runs the same entrypoint as Render: migrate, then run.
-Nothing has to be installed on the host but Docker. The Makefile targets:
+`docker-compose.yml` runs two services: `postgres` (`postgres:18` to match
+Render, published on `127.0.0.1:${POSTGRES_HOST_PORT:-5433}`, user, password,
+and database all `bluesky`, with a `pg_isready` healthcheck) and `sqlflow`
+(`build: .`, `depends_on` postgres healthy,
+`SQLFLOW_POSTGRES_URI=postgresql://bluesky:bluesky@postgres:5432/bluesky`).
+The host port is not 5432 because sql-flow's own dev stack already publishes a
+Postgres there. Starting compose runs the same entrypoint as Render: migrate,
+then run. Nothing has to be installed on the host but Docker. The Makefile
+targets:
 
 | Target | Runs |
 |---|---|
 | `validate` | `sqlflow validate /app/pipeline.yml` inside `turbolytics/sql-flow:v1.2.0` with `pipeline.yml` mounted |
 | `run` | `docker compose up --build` |
-| `migrate` | `docker compose run --rm --entrypoint /app/bin/migrate.sh sqlflow`, for re-running migrations alone |
-| `psql` | `docker compose exec postgres psql -U bluesky`, for querying |
+| `migrate` | `docker compose up -d --wait postgres`, then `docker compose run --rm -T --no-deps --entrypoint /app/bin/migrate.sh sqlflow`. `-T` matters: with a TTY and no terminal attached, compose swallows the output and still exits 0. |
+| `psql` | `docker compose exec postgres psql -U bluesky -d bluesky`, for querying |
 | `image` | `docker build -t sqlflow-bluesky-demo .` |
+| `clean` | `docker compose down -v` |
 
 ## CI
 
-`.github/workflows/ci.yml` runs on push and pull request with a
-`postgres:16` service container. Two jobs:
+`.github/workflows/ci.yml` runs on push and pull request. Two jobs:
 
-- **migrations**: run `bin/migrate.sh` twice; assert `psql` reports the table
-  `posts_per_minute_by_lang` and the view `pipeline_status`, and that the
-  second run printed `skipped` for every file.
-- **config**: run `sqlflow validate` in the pinned image with
-  `SQLFLOW_POSTGRES_URI` set to a placeholder. Exit code 0 is the assertion.
+- **migrations**: against a `postgres:18` service container, run
+  `bin/migrate.sh` twice; assert the first run applied and skipped nothing,
+  the second run applied nothing, and the table and view expose the columns
+  the demo page reads.
+- **image**: run `sqlflow validate` in the pinned image, then build the
+  Dockerfile Render builds on deploy.
+
+Because `render.yaml` sets `autoDeployTrigger: checksPass`, these jobs gate
+every deploy.
 
 ## Verification
 
