@@ -11,7 +11,7 @@ validate:
 ## migrate: apply migrations to the compose database without starting the pipeline
 migrate:
 	docker compose up -d --wait postgres
-	docker compose run --rm --no-deps --entrypoint /app/bin/migrate.sh sqlflow
+	docker compose run --rm -T --no-deps --entrypoint /app/bin/migrate.sh sqlflow
 
 ## run: start postgres and the pipeline, following logs
 run:

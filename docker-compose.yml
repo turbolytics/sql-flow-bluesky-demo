@@ -2,7 +2,8 @@
 # migrate, then run.
 services:
   postgres:
-    image: postgres:16
+    # Matches the Render database's major version.
+    image: postgres:18
     environment:
       POSTGRES_USER: bluesky
       POSTGRES_PASSWORD: bluesky
