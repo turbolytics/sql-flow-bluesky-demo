@@ -57,11 +57,16 @@ serve:
         FROM pg.pipeline_status
 
     - name: posts_by_lang
-      description: Posts per bucket per language. since and until bound the range; lang filters to one language.
+      description: >-
+        Posts per bucket per language. The top languages by posts over the range
+        keep their own series and the rest sum into lang "other"; top sets how
+        many, default 10, between 1 and 50. since and until bound the range. lang
+        returns one language, never folded.
       params:
         - {name: since, type: timestamp}
         - {name: until, type: timestamp}
         - {name: lang, type: string}
+        - {name: top, type: integer}
       grains:
         # Each grain reads a view, so the GROUP BY runs in Postgres. The minute
         # table is the pipeline's output and is not served.
@@ -69,27 +74,63 @@ serve:
         # Each grain defaults to a range it can afford and clamps a wider
         # request to a ceiling: greatest() raises a since earlier than the
         # ceiling to it.
+        #
+        # Bluesky tags posts with about 170 languages a day, and the top 10
+        # carry 95% of them. Serving every language put a 7-day hourly
+        # response past max_rows within days. The fold ranks languages by
+        # their total over the range, so every bucket carries the same series.
+        # It runs in DuckDB over rows the view already filtered, in one scan.
         5m:
           sql: |
-            SELECT bucket, lang, posts
-            FROM pg.posts_per_5m_by_lang
-            WHERE bucket >= greatest(coalesce($since, now() - INTERVAL '12 hours'), now() - INTERVAL '7 days')
-              AND bucket <  coalesce($until, now())
-              AND lang = coalesce($lang, lang)
+            SELECT bucket,
+                   CASE WHEN lang_rank <= least(greatest(coalesce($top, 10), 1), 50) THEN lang ELSE 'other' END AS lang,
+                   sum(posts)::BIGINT AS posts
+            FROM (
+              SELECT bucket, lang, posts,
+                     dense_rank() OVER (ORDER BY lang_total DESC, lang) AS lang_rank
+              FROM (
+                SELECT bucket, lang, posts, sum(posts) OVER (PARTITION BY lang) AS lang_total
+                FROM pg.posts_per_5m_by_lang
+                WHERE bucket >= greatest(coalesce($since, now() - INTERVAL '12 hours'), now() - INTERVAL '7 days')
+                  AND bucket <  coalesce($until, now())
+                  AND lang = coalesce($lang, lang)
+              )
+            )
+            GROUP BY ALL
             ORDER BY bucket, lang
         1h:
           sql: |
-            SELECT bucket, lang, posts
-            FROM pg.posts_per_hour_by_lang
-            WHERE bucket >= greatest(coalesce($since, now() - INTERVAL '7 days'), now() - INTERVAL '30 days')
-              AND bucket <  coalesce($until, now())
-              AND lang = coalesce($lang, lang)
+            SELECT bucket,
+                   CASE WHEN lang_rank <= least(greatest(coalesce($top, 10), 1), 50) THEN lang ELSE 'other' END AS lang,
+                   sum(posts)::BIGINT AS posts
+            FROM (
+              SELECT bucket, lang, posts,
+                     dense_rank() OVER (ORDER BY lang_total DESC, lang) AS lang_rank
+              FROM (
+                SELECT bucket, lang, posts, sum(posts) OVER (PARTITION BY lang) AS lang_total
+                FROM pg.posts_per_hour_by_lang
+                WHERE bucket >= greatest(coalesce($since, now() - INTERVAL '7 days'), now() - INTERVAL '30 days')
+                  AND bucket <  coalesce($until, now())
+                  AND lang = coalesce($lang, lang)
+              )
+            )
+            GROUP BY ALL
             ORDER BY bucket, lang
         1d:
           sql: |
-            SELECT bucket, lang, posts
-            FROM pg.posts_per_day_by_lang
-            WHERE bucket >= greatest(coalesce($since, now() - INTERVAL '30 days'), now() - INTERVAL '365 days')
-              AND bucket <  coalesce($until, now())
-              AND lang = coalesce($lang, lang)
+            SELECT bucket,
+                   CASE WHEN lang_rank <= least(greatest(coalesce($top, 10), 1), 50) THEN lang ELSE 'other' END AS lang,
+                   sum(posts)::BIGINT AS posts
+            FROM (
+              SELECT bucket, lang, posts,
+                     dense_rank() OVER (ORDER BY lang_total DESC, lang) AS lang_rank
+              FROM (
+                SELECT bucket, lang, posts, sum(posts) OVER (PARTITION BY lang) AS lang_total
+                FROM pg.posts_per_day_by_lang
+                WHERE bucket >= greatest(coalesce($since, now() - INTERVAL '30 days'), now() - INTERVAL '365 days')
+                  AND bucket <  coalesce($until, now())
+                  AND lang = coalesce($lang, lang)
+              )
+            )
+            GROUP BY ALL
             ORDER BY bucket, lang

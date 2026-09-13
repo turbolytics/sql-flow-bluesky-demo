@@ -233,18 +233,30 @@ serve:
             ORDER BY bucket, lang
 ```
 
-Row budget per grain, at about 33 languages a minute:
+Row budget per grain. Prod on 2026-09-13 carried 170 languages in a day,
+with the top 10 at 95% of posts. Serving every language put a 7-day hourly
+response at about 16,000 rows, past `max_rows`, within three days of data. So
+`posts_by_lang` keeps the top `top` languages by posts over the requested
+range, default 10 and clamped to 1 through 50, and sums the rest into
+`lang: "other"`. Every bucket carries the same series, because the ranking is
+over the whole range. A request with `lang` returns that language unfolded.
+The fold is window functions in DuckDB over rows the view already filtered;
+Postgres still receives one `COPY` with the range pushed in.
 
-| Grain | Default | Rows | Ceiling | Rows |
+| Grain | Default | Rows at top 10 | Ceiling | Rows at top 10 |
 |---|---|---|---|---|
-| `5m` | 12 h | 4,752 | 7 d | 66,528 |
-| `1h` | 7 d | 5,544 | 30 d | 23,760 |
-| `1d` | 30 d | 990 | 365 d | 12,045 |
+| `5m` | 12 h | 1,584 | 7 d | 22,176 |
+| `1h` | 7 d | 1,848 | 30 d | 7,920 |
+| `1d` | 30 d | 330 | 365 d | 4,015 |
 
-Every default fits under `max_rows` with room for the language count to
-vary. Every ceiling exceeds it, so a caller asking for a whole ceiling gets
-`truncated: true` and the earliest 10,000 rows. A caller who needs the range
-takes it in windows with `since` and `until`, or filters with `lang`.
+Every default fits under `max_rows` with room. Only the `5m` ceiling exceeds
+it, so a caller asking for all 7 days at 5 minutes gets `truncated: true` and
+the earliest 10,000 rows.
+
+Verified against Postgres 18 with 161 languages: series per bucket is 11,
+`top=3` gives 4, `top=0` clamps to 2, `top=999` to 51, `lang=tail007`
+returns that language alone, and the API's total over a window and one
+bucket's `other` both equal the same sums computed in Postgres.
 
 ## bin/serve.sh
 
