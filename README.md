@@ -375,6 +375,7 @@ retention policy yet.
 
 - The demo page, reading the API.
 - Choosing the grain from the requested range, so a page asks for a time
-  window and the API picks `5m`, `1h` or `1d`. Tracked in sql-flow.
+  window and the API picks `5m`, `1h` or `1d`:
+  [turbolytics/sql-flow#284](https://github.com/turbolytics/sql-flow/issues/284).
 - TurboStats, sqlflow's self-reported process state, to show real uptime
   instead of inferring it from missing minutes.
