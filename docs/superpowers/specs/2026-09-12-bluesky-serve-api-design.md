@@ -284,9 +284,12 @@ reports badly, migrate, `exec` so SIGTERM reaches sqlflow and the drain runs.
 
 ## Dockerfile
 
-Two changes: `COPY serve.yml /app/serve.yml`, and the pin moves from
-`v1.2.0` to the sql-flow release that ships `serve`. The `ENTRYPOINT` stays
-`entrypoint.sh`. Render's `dockerCommand` overrides it for the API.
+Three changes: `COPY serve.yml /app/serve.yml`; the pin moves from `v1.2.0`
+to `v1.3.0`, the sql-flow release that ships `serve`; and the base image is an
+`ARG SQLFLOW_IMAGE` defaulting to that pin, so an unreleased sqlflow build can
+be tried locally with `--build-arg`. Render and CI build with the default. The
+`ENTRYPOINT` stays `entrypoint.sh`. Render's `dockerCommand` overrides it for
+the API.
 
 ## render.yaml
 
@@ -369,10 +372,16 @@ container with a fixed token, wait on `/healthz`, then:
 
 - `GET /v1/datasets` lists `pipeline_status` and `posts_by_lang` with three
   grains, `5m`, `1h`, `1d`, and no `1m`.
-- `GET /v1/datasets/posts_by_lang?grain=1h` after inserting two known minutes
-  returns one row whose `posts` is their sum.
+- After inserting three minutes in one hour, two `en` and one `ja`,
+  `grain=1h&top=1` returns `en` as their sum and `ja` as `other`, and
+  `lang=ja` returns `ja` unfolded.
+- `pipeline_status` counts the inserted minutes and posts.
 - `GET /v1/datasets/posts_by_lang` without a grain is `400 missing_grain`.
 - No token is `401`.
+
+Run locally before the PR, with the image built on a local sqlflow build of
+main: every assertion passed, and changing the expected `other` sum made the
+job fail.
 
 This job is the only place the attachment path is exercised end to end.
 sql-flow's own tests run without Postgres.
