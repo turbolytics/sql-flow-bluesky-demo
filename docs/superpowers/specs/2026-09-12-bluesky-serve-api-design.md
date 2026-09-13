@@ -55,6 +55,27 @@ COPY (SELECT "bucket", "lang", "posts" FROM "public"."posts_per_day_by_lang"
 300 rows crossed the wire. Without the view, 432k rows crossed and DuckDB
 grouped them.
 
+Re-measured at implementation with `serve.yml` as written, through
+`sqlflow serve`, against 40 days of synthetic minutes. DuckDB folds the
+`greatest`, `coalesce`, `now()` and bound `since` into literals, so every grain
+pushes its range into the view:
+
+```
+COPY (SELECT "bucket", "lang", "posts" FROM "public"."posts_per_hour_by_lang"
+      WHERE ("bucket" >= '2026-09-10 20:26:27+00' AND "bucket" < '2026-09-13 20:26:27.664313+00'))
+```
+
+Each grain's default range answered in 33 to 193 ms. The `lang` filter does
+not push down: `lang = coalesce($lang, lang)` is applied in DuckDB, so a
+one-language request copies every language's rows for the range. At about 33
+languages that is a few thousand rows, and not worth a second statement per
+grain.
+
+The API holds at most `pg_connection_limit` Postgres connections. After 30
+sequential and then 30 concurrent requests, `pg_stat_activity` showed the same
+four backends, opened on the first requests and reused. Requests share one
+DuckDB connection and run one at a time.
+
 ## Files
 
 ```
@@ -84,20 +105,24 @@ FROM posts_per_minute_by_lang
 GROUP BY 1, 2;
 
 CREATE OR REPLACE VIEW posts_per_hour_by_lang AS
-SELECT date_trunc('hour', bucket) AS bucket, lang, sum(posts)::bigint AS posts
+SELECT date_trunc('hour', bucket, 'UTC') AS bucket, lang, sum(posts)::bigint AS posts
 FROM posts_per_minute_by_lang
 GROUP BY 1, 2;
 
 CREATE OR REPLACE VIEW posts_per_day_by_lang AS
-SELECT date_trunc('day', bucket) AS bucket, lang, sum(posts)::bigint AS posts
+SELECT date_trunc('day', bucket, 'UTC') AS bucket, lang, sum(posts)::bigint AS posts
 FROM posts_per_minute_by_lang
 GROUP BY 1, 2;
 ```
 
-`date_trunc` and `date_bin` on a `TIMESTAMPTZ` truncate in the session
-timezone. The pipeline pins `UTC`, the migrations run under `TZ=UTC` in the
-image, and the serve config pins `UTC` too. CI asserts the view's day
-boundary is midnight UTC.
+`date_trunc`'s two-argument form truncates a `TIMESTAMPTZ` in the session
+zone, and nothing here controls the zone of the connections DuckDB opens. The
+three-argument form, in Postgres since 12, truncates in UTC whatever the
+session says. `date_bin` bins by an absolute interval from its origin and has
+no zone to take. Measured on Postgres 18 from an `Asia/Kolkata` session: the
+two-argument form put the day bucket at 18:30 UTC and the hour at :30, and the
+three-argument form put both on the UTC boundary. CI reads the views back from
+that zone.
 
 Known limit: a predicate on a view's grouped column does not use the minute
 table's primary key. Each coarse-grain request scans the minute rows. At

@@ -60,6 +60,35 @@ jobs:
             SELECT first_bucket, latest_bucket, last_write_at,
                    minutes_observed, total_posts
             FROM pipeline_status"
+          for view in posts_per_5m_by_lang posts_per_hour_by_lang posts_per_day_by_lang; do
+            psql "$SQLFLOW_POSTGRES_URI" -v ON_ERROR_STOP=1 -c "
+              SELECT bucket, lang, posts FROM $view WHERE false"
+          done
+
+      # Two minutes either side of UTC midnight, read back from a session in
+      # Asia/Kolkata. date_trunc's two-argument form truncates in the session
+      # zone and would put the day at 18:30 UTC and the hour at :30. The API
+      # serves UTC buckets whatever zone a DuckDB connection happens to open in.
+      - name: The rollup views bucket in UTC whatever the session zone
+        run: |
+          psql "$SQLFLOW_POSTGRES_URI" -v ON_ERROR_STOP=1 -c "
+            INSERT INTO posts_per_minute_by_lang (bucket, lang, posts) VALUES
+              ('2026-09-10 23:59:00+00', 'en', 1),
+              ('2026-09-11 00:04:00+00', 'en', 2)"
+          got=$(PGTZ=Asia/Kolkata psql "$SQLFLOW_POSTGRES_URI" -v ON_ERROR_STOP=1 -tA -c "
+            SELECT string_agg(grain || ' ' || to_char(bucket AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI') || ' ' || posts,
+                              ', ' ORDER BY grain, bucket)
+            FROM (
+              SELECT '5m' AS grain, bucket, posts FROM posts_per_5m_by_lang
+              UNION ALL SELECT '1h', bucket, posts FROM posts_per_hour_by_lang
+              UNION ALL SELECT '1d', bucket, posts FROM posts_per_day_by_lang
+            ) AS v")
+          want="1d 2026-09-10 00:00 1, 1d 2026-09-11 00:00 2, 1h 2026-09-10 23:00 1, 1h 2026-09-11 00:00 2, 5m 2026-09-10 23:55 1, 5m 2026-09-11 00:00 2"
+          if [ "$got" != "$want" ]; then
+            printf 'views bucket wrong\n got: %s\nwant: %s\n' "$got" "$want" >&2
+            exit 1
+          fi
+          psql "$SQLFLOW_POSTGRES_URI" -v ON_ERROR_STOP=1 -c "TRUNCATE posts_per_minute_by_lang"
 
   image:
     runs-on: ubuntu-latest
