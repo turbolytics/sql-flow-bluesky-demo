@@ -30,6 +30,7 @@ Made in the design conversation. Each one closes a fork.
 | Migrations | Both services run `bin/migrate.sh` at start. | Worker only. The script takes an advisory lock and applies each file in one transaction, so two instances at once are safe, and the API then never waits on the worker's deploy to find its views. |
 | Caching and rate limits | None in v1. `Cache-Control: no-store`. | Both are sql-flow follow-ups. The demo's load is a page poll, and the views keep each request cheap. |
 | Time range | Each grain's SQL defaults and clamps its own range. | Server-side range limits. The SQL is the author's; a clamp in `coalesce` and `greatest` is one line. |
+| Grains served | `5m`, `1h`, `1d`, each from a view. The minute table is not served. | A `1m` grain over the raw table. The API starts at the coarsest useful grain; a minute grain is a later addition if the page needs it, and it needs no new view. |
 
 ## Data flow
 
@@ -174,17 +175,13 @@ serve:
         - {name: until, type: timestamp}
         - {name: lang,  type: string}
       grains:
+        # Each grain reads a view, so the GROUP BY runs in Postgres. The
+        # minute table is the pipeline's output and is not served; the
+        # coarsest useful grain is where the API starts.
+        #
         # Each grain defaults to a range it can afford and clamps a wider
         # request to a ceiling. The clamp is greatest(): a since earlier than
         # the ceiling is raised to it.
-        1m:
-          sql: |
-            SELECT bucket, lang, posts
-            FROM pg.posts_per_minute_by_lang
-            WHERE bucket >= greatest(coalesce($since, now() - INTERVAL '3 hours'),  now() - INTERVAL '24 hours')
-              AND bucket <  coalesce($until, now())
-              AND lang = coalesce($lang, lang)
-            ORDER BY bucket, lang
         5m:
           sql: |
             SELECT bucket, lang, posts
@@ -215,7 +212,6 @@ Row budget per grain, at about 33 languages a minute:
 
 | Grain | Default | Rows | Ceiling | Rows |
 |---|---|---|---|---|
-| `1m` | 3 h | 5,940 | 24 h | 47,520 |
 | `5m` | 12 h | 4,752 | 7 d | 66,528 |
 | `1h` | 7 d | 5,544 | 30 d | 23,760 |
 | `1d` | 30 d | 990 | 365 d | 12,045 |
@@ -334,8 +330,8 @@ inserting a known minute.
 New `api` job: build the image, start Postgres, run `bin/serve.sh` in the
 container with a fixed token, wait on `/healthz`, then:
 
-- `GET /v1/datasets` lists `pipeline_status` and `posts_by_lang` with four
-  grains.
+- `GET /v1/datasets` lists `pipeline_status` and `posts_by_lang` with three
+  grains, `5m`, `1h`, `1d`, and no `1m`.
 - `GET /v1/datasets/posts_by_lang?grain=1h` after inserting two known minutes
   returns one row whose `posts` is their sum.
 - `GET /v1/datasets/posts_by_lang` without a grain is `400 missing_grain`.
