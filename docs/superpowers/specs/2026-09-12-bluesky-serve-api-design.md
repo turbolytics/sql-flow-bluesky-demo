@@ -124,11 +124,28 @@ two-argument form put the day bucket at 18:30 UTC and the hour at :30, and the
 three-argument form put both on the UTC boundary. CI reads the views back from
 that zone.
 
-Known limit: a predicate on a view's grouped column does not use the minute
-table's primary key. Each coarse-grain request scans the minute rows. At
-about 47k rows a day that is tens of milliseconds now and a couple of seconds
-after a year. The fix when it matters is rollup tables the pipeline maintains.
-Not this PR.
+A filter on a view's bucket reaches the minute table as a filter on the
+view's expression, such as `date_trunc('hour', bucket, 'UTC') >= …`, which the
+primary key on `bucket` cannot serve. Without help every request read the
+whole table, so a 12-hour chart slowed with every day of history.
+`migrations/0004_rollup_view_indexes.sql` adds one index per view on exactly
+that expression; both functions are immutable in these forms. Measured on
+880k minute rows over 40 days:
+
+| Request | Without | With |
+|---|---|---|
+| `5m`, 12 h | 33 ms, full scan | 4.5 ms, 17.8k rows |
+| `1h`, 12 h | 185 ms, full scan | 7 ms, 17.6k rows |
+| `1h`, 7 d | 345 ms | 141 ms, 321k rows |
+| `1d`, 30 d | 462 ms | 277 ms, still a scan of most of the table |
+
+Each index was about 6 MB. CI plans each view with sequential scans off and
+fails unless it uses its index, which catches an index expression that drifts
+from its view's.
+
+Known limit: a range covering most of the history still reads most of the
+minute table, so a `1d` request over a year of data approaches seconds. The
+fix when it matters is rollup tables the pipeline maintains. Not this PR.
 
 ## serve.yml
 

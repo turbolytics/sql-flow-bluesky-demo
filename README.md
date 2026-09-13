@@ -77,7 +77,9 @@ $ SELECT lang, posts FROM posts_per_minute_by_lang
 ```
 
 `posts_per_5m_by_lang`, `posts_per_hour_by_lang` and `posts_per_day_by_lang`
-sum the minutes into coarser buckets, in UTC. The API reads them.
+sum the minutes into coarser buckets, in UTC. The API reads them. Each has an
+index on the minute table matching its bucket expression, so a request reads
+the minutes in its range rather than the whole table.
 
 A minute with no rows is a minute the pipeline was not running. This query
 lists them:

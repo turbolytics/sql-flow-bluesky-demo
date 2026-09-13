@@ -90,6 +90,25 @@ jobs:
           fi
           psql "$SQLFLOW_POSTGRES_URI" -v ON_ERROR_STOP=1 -c "TRUNCATE posts_per_minute_by_lang"
 
+      # With sequential scans off, a view whose filter no index serves still
+      # plans a Seq Scan. An index whose expression drifts from its view's
+      # would pass every other check and scan the whole table on every request.
+      - name: Each rollup view's range filter uses its index
+        run: |
+          for pair in posts_per_5m_by_lang:posts_per_minute_by_lang_5m_idx \
+                      posts_per_hour_by_lang:posts_per_minute_by_lang_hour_idx \
+                      posts_per_day_by_lang:posts_per_minute_by_lang_day_idx; do
+            view=${pair%%:*}; index=${pair##*:}
+            plan=$(psql "$SQLFLOW_POSTGRES_URI" -v ON_ERROR_STOP=1 -tA -c "
+              SET enable_seqscan = off;
+              EXPLAIN (COSTS OFF) SELECT bucket, lang, posts FROM $view
+              WHERE bucket >= now() - INTERVAL '12 hours' AND bucket < now()")
+            if ! grep -q "Index Scan on $index\|Index Scan using $index" <<<"$plan"; then
+              printf '%s does not use %s:\n%s\n' "$view" "$index" "$plan" >&2
+              exit 1
+            fi
+          done
+
   image:
     runs-on: ubuntu-latest
     steps:
