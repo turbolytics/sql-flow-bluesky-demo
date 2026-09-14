@@ -40,7 +40,7 @@ There is no state file.
 
 ## What gets stored
 
-One table and one view.
+One table and four views.
 
 `posts_per_minute_by_lang` holds one row per minute per language:
 
@@ -76,6 +76,11 @@ $ SELECT lang, posts FROM posts_per_minute_by_lang
  es      |    66
 ```
 
+`posts_per_5m_by_lang`, `posts_per_hour_by_lang` and `posts_per_day_by_lang`
+sum the minutes into coarser buckets, in UTC. The API reads them. Each has an
+index on the minute table matching its bucket expression, so a request reads
+the minutes in its range rather than the whole table.
+
 A minute with no rows is a minute the pipeline was not running. This query
 lists them:
 
@@ -90,6 +95,120 @@ WHERE NOT EXISTS (
   SELECT 1 FROM posts_per_minute_by_lang p WHERE p.bucket = m
 );
 ```
+
+## Query it over HTTP
+
+A second service runs `sqlflow serve` with [`serve.yml`](serve.yml) and
+exposes the rollups as JSON. This section is the contract a page codes
+against.
+
+Every request except `/healthz` sends a bearer token:
+
+```
+Authorization: Bearer <token>
+```
+
+The token names the caller in the API's log. It is not a secret: a page ships
+it in its JavaScript. Browsers may call from `https://turbolytics.io` and
+`https://www.turbolytics.io`.
+
+| Route | Returns |
+|---|---|
+| `GET /healthz` | `{"status":"ok"}`, no token needed |
+| `GET /v1/datasets` | Every dataset, its params, grains and SQL |
+| `GET /v1/datasets/pipeline_status` | One row: first and latest minute, last write, minutes observed, total posts |
+| `GET /v1/datasets/posts_by_lang?grain=…` | Posts per bucket per language |
+
+`posts_by_lang` takes a required `grain` and four optional params:
+
+| Param | Type | Meaning |
+|---|---|---|
+| `since` | RFC 3339 timestamp with an offset | Start of the range, inclusive. Encode `+` as `%2B`. |
+| `until` | RFC 3339 timestamp with an offset | End of the range, exclusive. Defaults to now. |
+| `lang` | string | One language, never folded into `other`. |
+| `top` | integer | How many languages keep their own series. Default 10, clamped to 1 through 50. |
+
+Bluesky tags posts with about 170 languages a day, and the top 10 carry 95%
+of posts. So the top `top` languages by posts over the whole range keep their
+own series, and the rest sum into `lang: "other"`. Every bucket carries the
+same series. A language absent from a bucket has no row; draw it as zero.
+
+| Grain | Reads | Default range | Widest range |
+|---|---|---|---|
+| `5m` | `posts_per_5m_by_lang` | 12 hours | 7 days |
+| `1h` | `posts_per_hour_by_lang` | 7 days | 30 days |
+| `1d` | `posts_per_day_by_lang` | 30 days | 365 days |
+
+A `since` older than the widest range is raised to it. A response holds at
+most 10,000 rows; `truncated: true` means the range had more, and the rows
+returned are the earliest. Only a full 7 days at `5m` reaches that.
+
+Output from a local run against two hours of sample minutes:
+
+```
+$ curl -H 'Authorization: Bearer local-dev-token' \
+    'localhost:8080/v1/datasets/posts_by_lang?grain=1h&top=3&since=2026-09-13T18:00:00Z&until=2026-09-13T20:00:00Z'
+{
+  "dataset": "posts_by_lang",
+  "grain": "1h",
+  "columns": [
+    {"name": "bucket", "type": "TIMESTAMP WITH TIME ZONE"},
+    {"name": "lang", "type": "VARCHAR"},
+    {"name": "posts", "type": "BIGINT"}
+  ],
+  "rows": [
+    {"bucket": "2026-09-13T18:00:00Z", "lang": "en", "posts": 102703},
+    {"bucket": "2026-09-13T18:00:00Z", "lang": "ja", "posts": 14496},
+    {"bucket": "2026-09-13T18:00:00Z", "lang": "other", "posts": 18352},
+    {"bucket": "2026-09-13T18:00:00Z", "lang": "unknown", "posts": 34843},
+    {"bucket": "2026-09-13T19:00:00Z", "lang": "en", "posts": 102360},
+    {"bucket": "2026-09-13T19:00:00Z", "lang": "ja", "posts": 14325},
+    {"bucket": "2026-09-13T19:00:00Z", "lang": "other", "posts": 18353},
+    {"bucket": "2026-09-13T19:00:00Z", "lang": "unknown", "posts": 34735}
+  ],
+  "row_count": 8,
+  "truncated": false,
+  "elapsed_ms": 6
+}
+
+$ curl -H 'Authorization: Bearer local-dev-token' \
+    localhost:8080/v1/datasets/pipeline_status
+{
+  "dataset": "pipeline_status",
+  "columns": [...],
+  "rows": [
+    {
+      "first_bucket": "2026-09-13T18:00:00Z",
+      "latest_bucket": "2026-09-13T19:59:00Z",
+      "last_write_at": "2026-09-13T20:01:00Z",
+      "minutes_observed": 120,
+      "total_posts": 340167
+    }
+  ],
+  "row_count": 1,
+  "truncated": false,
+  "elapsed_ms": 2
+}
+```
+
+Buckets and timestamps are UTC. Rows sort by bucket, then language.
+
+Every refusal has one shape:
+
+```
+{"error": {"code": "unknown_grain", "message": "dataset posts_by_lang has no grain 15m; grains: 1d, 1h, 5m"}}
+```
+
+A page should handle three statuses:
+
+| Status | Codes | What happened |
+|---|---|---|
+| `400` | `missing_grain`, `unknown_grain`, `unknown_param`, `invalid_param` | The request is wrong. The message names the param or grain. |
+| `401` | `unauthorized` | No token, or not the configured one. |
+| `504` | `query_timeout` | The query took longer than 10 seconds. Retry later. |
+
+A `500` with `query_failed` means the database failed; the API's log has the
+cause.
 
 ## Run it locally
 
@@ -121,22 +240,37 @@ In a second terminal, open a Postgres shell and query:
 make psql
 ```
 
+To run only the API against the local database:
+
+```
+make serve
+```
+
+It listens on `127.0.0.1:8080` with the token `local-dev-token`, which exists
+only in `docker-compose.yml`. `make run` starts the API beside the pipeline.
+
 Other targets:
 
 | Target | Does |
 |---|---|
-| `make validate` | Checks `pipeline.yml` against the pinned sqlflow image. |
+| `make validate` | Checks `pipeline.yml` and `serve.yml` against the pinned sqlflow image. |
 | `make migrate` | Applies migrations without starting the pipeline. |
-| `make image` | Builds the worker image. |
+| `make serve` | Starts Postgres and the API. |
+| `make image` | Builds the image the worker and the API share. |
 | `make clean` | Stops everything and deletes the local database. |
+
+To try an unreleased sqlflow build, set `SQLFLOW_IMAGE` to its image tag for
+`make run`, `make serve` or `make image`.
 
 Compose publishes Postgres on `127.0.0.1:5433`, so it does not collide with a
 Postgres already on 5432. Set `POSTGRES_HOST_PORT` to change it.
 
 ## Deploy to Render
 
-[`render.yaml`](render.yaml) is a Render Blueprint. It defines one background
-worker, built from the [`Dockerfile`](Dockerfile).
+[`render.yaml`](render.yaml) is a Render Blueprint. It defines two services,
+both built from the [`Dockerfile`](Dockerfile): the `sqlflow-bluesky`
+background worker, and the `sqlflow-bluesky-api` web service, which runs
+`bin/serve.sh` instead of the worker's entrypoint.
 
 The Blueprint does not create the database. It connects to an existing Render
 Postgres named `sqlflow-demo-rollups` in the `virginia` region. To deploy your
@@ -147,13 +281,19 @@ worker uses the database's private connection string.
 To deploy:
 
 1. In the Render Dashboard, create a new Blueprint and select this repository.
-2. Render reads `render.yaml` and creates the `sqlflow-bluesky` worker.
+2. Render reads `render.yaml` and creates the worker and the API.
 
-Render sets `SQLFLOW_POSTGRES_URI` from the database. You enter no secrets.
+Render sets `SQLFLOW_POSTGRES_URI` from the database for both services. You
+enter no secrets.
 
-On every start, the worker applies pending migrations and then runs sqlflow.
-A deploy provisions its own schema. Render deploys a commit only after CI
-passes.
+Render mints the API's token, `SQLFLOW_SERVE_TOKEN_BLUESKY_DEMO`, once, when
+it creates the service. Copy it from the API's Environment page into the page
+that calls the API. To rotate it, edit the variable, redeploy the API, and
+update the page.
+
+On every start, both services apply pending migrations, then run sqlflow. The
+migration script takes a lock, so the two can start together. Render deploys
+a commit only after CI passes.
 
 ## Configuration
 
@@ -168,6 +308,17 @@ The worker reads three environment variables:
 Without `SQLFLOW_POSTGRES_URI`, the worker exits with code 2 before touching
 anything. To connect from outside Render, use the database's external URL and
 append `?sslmode=require`.
+
+The API reads four:
+
+| Variable | Required | Default |
+|---|---|---|
+| `SQLFLOW_POSTGRES_URI` | yes | none |
+| `SQLFLOW_SERVE_TOKEN_BLUESKY_DEMO` | yes | none |
+| `SQLFLOW_SERVE_PORT` | no | `8080` |
+| `SQLFLOW_LOG_LEVEL` | no | `INFO` |
+
+Without either required variable, the API exits with code 2.
 
 ## Delivery semantics and known gaps
 
@@ -224,6 +375,9 @@ retention policy yet.
 
 ## What comes next
 
-- The demo page, reading `pipeline_status`.
+- The demo page, reading the API.
+- Choosing the grain from the requested range, so a page asks for a time
+  window and the API picks `5m`, `1h` or `1d`:
+  [turbolytics/sql-flow#284](https://github.com/turbolytics/sql-flow/issues/284).
 - TurboStats, sqlflow's self-reported process state, to show real uptime
   instead of inferring it from missing minutes.
