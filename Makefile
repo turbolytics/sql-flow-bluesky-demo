@@ -1,5 +1,5 @@
 # The pinned sqlflow image. Must match the Dockerfile and CI.
-SQLFLOW_IMAGE ?= turbolytics/sql-flow:v1.2.0
+SQLFLOW_IMAGE ?= turbolytics/sql-flow:v2026.09.14
 
 .PHONY: validate migrate psql run image clean
 

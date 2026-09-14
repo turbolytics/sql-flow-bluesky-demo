@@ -1,7 +1,7 @@
 # The published sqlflow image carries the matching libduckdb.so and sets
 # SQLFLOW_DUCKDB_LIB. Pinned: a sql-flow release could change the config
 # schema under this pipeline. Must match the Makefile and CI.
-FROM turbolytics/sql-flow:v1.2.0
+FROM turbolytics/sql-flow:v2026.09.14
 
 # psql applies the migrations. postgresql-client is the only addition.
 RUN apt-get update \

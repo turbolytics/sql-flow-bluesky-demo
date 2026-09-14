@@ -33,10 +33,10 @@ tables:
   sql:
     - name: posts_per_minute_by_lang
       # No unique index, on purpose. In-memory DuckDB never frees rows deleted
-      # from an indexed table, and the manager deletes every closed minute, so
+      # from an indexed table, and the engine deletes every closed minute, so
       # the index grew the worker from 100 MB to 450 MB in a day on a 512 MB
-      # plan. Without it, each batch appends its own counts and the collect
-      # query sums them per minute. Measured flat over eight hours.
+      # plan. Without it, each batch appends its own counts and emit_sql sums
+      # them per minute. Measured flat over eight hours.
       # See turbolytics/sql-flow#268.
       sql: |
         CREATE TABLE IF NOT EXISTS posts_per_minute_by_lang (
@@ -45,50 +45,50 @@ tables:
           posts INTEGER
         );
 
-      manager:
-        # A window closes against the stream's own clock, not wall clock.
-        # max(bucket) is the newest window the data has reached, so a window
-        # closes only once the stream has moved past it. That keeps the result
-        # identical whether the data arrives live or as a replay. With now()
-        # here instead, a pipeline running behind real time by more than the
-        # grace period publishes a window whose rows are still arriving, once
-        # per poll, and those parts are indistinguishable downstream from an
-        # at-least-once duplicate.
-        #
-        # The second branch is the idleness bound. A stream that goes quiet
-        # never moves its own clock, so the first branch alone would hold the
-        # newest window open until data a full grace newer arrived.
-        # sqlflow_progress.last_arrival is when the newest batch was written,
-        # so after a grace of silence every open window closes.
-        #
-        # The grace outlives the batch wait on purpose: an event from the last
-        # seconds of a window can reach DuckDB up to a flush interval after the
-        # window ended.
-        tumbling_window:
-          poll_interval_seconds: 10
-          # One row per minute and language. The table holds one row per batch,
-          # and the Postgres upsert below must not see the same key twice in
-          # one statement.
-          collect_closed_windows_sql: |
-            SELECT bucket, lang, sum(posts)::INTEGER AS posts
-            FROM posts_per_minute_by_lang
-            WHERE bucket + INTERVAL '1 minute' < (SELECT max(bucket) FROM posts_per_minute_by_lang) - INTERVAL '60 seconds'
-               OR (SELECT now() - last_arrival FROM sqlflow_progress) > INTERVAL '1 minute'
-            GROUP BY bucket, lang
-          delete_closed_windows_sql: |
-            DELETE FROM posts_per_minute_by_lang
-            WHERE bucket + INTERVAL '1 minute' < (SELECT max(bucket) FROM posts_per_minute_by_lang) - INTERVAL '60 seconds'
-               OR (SELECT now() - last_arrival FROM sqlflow_progress) > INTERVAL '1 minute'
+      # sqlflow closes each minute against an event-time watermark: the newest
+      # minute the data has reached, less the grace. A minute closes once the
+      # stream has moved grace_seconds past its end, so the result is the same
+      # whether the data arrives live or as a replay. The one wall-clock rule
+      # is the idle bound: after idle_close_seconds with no batch arriving,
+      # every open minute closes, so a quiet stream still publishes its last
+      # minute.
+      #
+      # The grace outlives the batch wait on purpose. A batch is written when
+      # it fills or after flush_interval_seconds, so an event from the last
+      # seconds of a minute can reach DuckDB up to that long after the minute
+      # ended.
+      #
+      # late_rows is drop, not reemit. A late row belongs to a minute that
+      # already closed, and that minute's other rows are already deleted from
+      # DuckDB. reemit publishes only the late rows, and the upsert below
+      # replaces the minute's count with theirs: in a local run, one late post
+      # turned a published count of 5 into 1. drop discards the row, logs
+      # "dropped late rows", and counts it in window_late_rows_total.
+      window:
+        time_column: bucket
+        size_seconds: 60
+        grace_seconds: 60
+        idle_close_seconds: 60
+        late_rows: drop
+        poll_interval_seconds: 10
+        # One row per minute and language. The table holds one row per batch,
+        # and the Postgres upsert below must not see the same key twice in one
+        # statement.
+        emit_sql: |
+          SELECT bucket, lang, sum(posts)::INTEGER AS posts
+          FROM closed
+          GROUP BY bucket, lang
 
         sink:
           type: sqlcommand
           sqlcommand:
-            # ON CONFLICT is what makes at-least-once survivable. The manager
-            # deletes a window only after the sink accepts it, so a crash
-            # between the two republishes that window on the next poll. Against
-            # the target's primary key a bare INSERT fails that republish, and
-            # because the failed flush also blocks the delete, every later poll
-            # collects the same rows and fails the same way.
+            # ON CONFLICT is what makes at-least-once delivery survivable. A
+            # minute can reach Postgres twice: the sink retries a write that
+            # timed out or lost its connection, which may already have landed,
+            # and a close whose delete conflicts with the pipeline rolls back
+            # and publishes the same minute on the next poll. Against the
+            # primary key a bare INSERT fails that second write, and a failed
+            # write stops the worker.
             #
             # updated_at is listed and selected as now() on purpose. The
             # postgres extension sends rows that do not conflict through a
@@ -127,7 +127,7 @@ pipeline:
       WHERE commit.operation = 'create'
       GROUP BY bucket, lang
 
-  # The window manager does the writing. A pipeline sink would write every
+  # The window's sink does the writing. A pipeline sink would write every
   # batch, which is the opposite of aggregating.
   sink:
     type: noop

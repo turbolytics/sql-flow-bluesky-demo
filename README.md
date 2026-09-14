@@ -25,11 +25,15 @@ than about moving rows, and it keeps writes low: about 33 rows per minute.
    runs inside the process.
 3. The handler's SQL groups the batch by minute and first language and adds
    the counts to an in-memory DuckDB table.
-4. Every 10 seconds, sqlflow's window manager looks for closed minutes. A
-   minute closes once the stream has moved 60 seconds past it, or once no
-   data has arrived for a minute.
-5. The manager upserts closed minutes into Postgres, then deletes them from
+4. Every 10 seconds, sqlflow checks the table's window for closed minutes. A
+   minute closes once the stream's event time is 60 seconds past the minute's
+   end, or once no data has arrived for a minute.
+5. sqlflow upserts closed minutes into Postgres, then deletes them from
    DuckDB.
+
+`pipeline.yml` declares the window: the time column, the bucket size, the
+grace, the idle bound, and what happens to a late row. sqlflow keeps the
+watermark and generates the SQL that collects and deletes closed minutes.
 
 The whole pipeline is [`pipeline.yml`](pipeline.yml). DuckDB runs in memory.
 There is no state file.
@@ -103,12 +107,13 @@ The worker applies the migrations, then starts streaming:
 applied  0001_posts_per_minute_by_lang
 applied  0002_pipeline_status_view
 ... Executing command step {"name": "attach postgres"}
-... starting tumbling window manager {"poll_interval": "10s"}
-... throughput {"messages_consumed": 182, "total_throughput_per_second": 37.5}
+... starting watermark manager {"table": "posts_per_minute_by_lang", "poll_interval": "10s"}
+... throughput {"messages_consumed": 199, "total_throughput_per_second": 40.9}
 ```
 
-The first row appears about two minutes after the first full minute ends:
-one minute of window plus 60 seconds of grace.
+Each minute reaches Postgres about 70 seconds after it ends: 60 seconds of
+grace, plus up to one 10-second poll. The first minute is partial, because the worker
+started partway through it.
 
 In a second terminal, open a Postgres shell and query:
 
@@ -168,9 +173,22 @@ append `?sslmode=require`.
 
 ### Postgres writes are at-least-once
 
-sqlflow writes a closed minute to Postgres before deleting it from DuckDB. A
-crash between the two writes that minute again on restart. The upsert on
-`(bucket, lang)` absorbs the duplicate, so counts stay correct.
+sqlflow writes a closed minute to Postgres before deleting it from DuckDB. The
+same minute can be written twice: the sink retries a write that timed out,
+which may already have landed, and a close whose delete conflicts with the
+pipeline rolls back and publishes the minute again on the next poll. The upsert
+on `(bucket, lang)` absorbs the duplicate, so counts stay correct.
+
+### A late post is dropped
+
+A post for a minute that already closed is late. sqlflow discards it and logs
+`dropped late rows` with the count. The published minute keeps the count it
+closed with.
+
+The pipeline declares `late_rows: drop` on purpose. The alternative, `reemit`,
+publishes the late posts as the minute's rows, and the upsert replaces the
+minute's count with theirs. In a local run, one late post turned a published
+count of 5 into 1.
 
 ### A restart loses data
 
@@ -185,13 +203,14 @@ start is partial.
 The fix belongs in sqlflow: persist the last event time and send it as the
 Jetstream `cursor` parameter on reconnect.
 
-### A rejected write does not stop the worker
+### A rejected write stops the worker
 
-When Postgres rejects a window write, sqlflow logs `poll failed` and retries on
-the next poll. It never exits. A write that can never succeed, such as a
-constraint violation, therefore publishes nothing while the worker looks
-healthy. Watch the logs for `poll failed`. Liveness alone does not show the
-failure. The fix belongs in sqlflow.
+When Postgres rejects a window write, sqlflow logs `table manager failed,
+pipeline stopped` and exits with code 1. Render restarts the worker. A write
+that can never succeed, such as a constraint violation, stops the worker again
+at the first closed minute after each restart. The failure shows as a restart
+loop in the Render dashboard, and each restart loses the minutes held in
+memory.
 
 ### A post counts under its first language
 
