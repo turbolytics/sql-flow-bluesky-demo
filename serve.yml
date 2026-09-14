@@ -1,0 +1,136 @@
+# Serves the rollups the pipeline writes, read-only, from the same Postgres.
+#
+#   sqlflow serve -c serve.yml
+#
+# SQLFLOW_POSTGRES_URI              required
+# SQLFLOW_SERVE_TOKEN_BLUESKY_DEMO  required
+# SQLFLOW_SERVE_PORT                default 8080
+commands:
+  - name: pin the session timezone
+    sql: |
+      SET TimeZone='UTC';
+
+  - name: load postgres extension
+    sql: |
+      INSTALL postgres;
+      LOAD postgres;
+
+  # One scan fans out across ctid ranges, each on its own Postgres connection.
+  # The default cap is 64. The Render plan allows far fewer.
+  - name: bound the postgres connections one scan may open
+    sql: |
+      SET pg_connection_limit = 4;
+
+  # READ_ONLY is the guard. A write in a dataset's SQL fails at startup, not in
+  # the table.
+  - name: attach postgres
+    sql: |
+      ATTACH '{{ SQLFLOW_POSTGRES_URI }}' AS pg (TYPE POSTGRES, READ_ONLY);
+
+serve:
+  name: bluesky-demo-api
+
+  http:
+    addr: "0.0.0.0:{{ SQLFLOW_SERVE_PORT|default('8080') }}"
+    cors:
+      allowed_origins:
+        - https://turbolytics.io
+        - https://www.turbolytics.io
+
+  auth:
+    tokens:
+      # An identity, not a secret: the page ships it in its JS. It exists so
+      # the log names the caller and so the value can be rotated.
+      - name: bluesky-demo-page
+        token: "{{ SQLFLOW_SERVE_TOKEN_BLUESKY_DEMO }}"
+
+  limits:
+    max_rows: 10000
+    timeout_seconds: 10
+
+  datasets:
+    - name: pipeline_status
+      description: First and latest minute, last write, minutes observed, total posts. One row.
+      sql: |
+        SELECT first_bucket, latest_bucket, last_write_at,
+               minutes_observed, total_posts
+        FROM pg.pipeline_status
+
+    - name: posts_by_lang
+      description: >-
+        Posts per bucket per language. The top languages by posts over the range
+        keep their own series and the rest sum into lang "other"; top sets how
+        many, default 10, between 1 and 50. since and until bound the range. lang
+        returns one language, never folded.
+      params:
+        - {name: since, type: timestamp}
+        - {name: until, type: timestamp}
+        - {name: lang, type: string}
+        - {name: top, type: integer}
+      grains:
+        # Each grain reads a view, so the GROUP BY runs in Postgres. The minute
+        # table is the pipeline's output and is not served.
+        #
+        # Each grain defaults to a range it can afford and clamps a wider
+        # request to a ceiling: greatest() raises a since earlier than the
+        # ceiling to it.
+        #
+        # Bluesky tags posts with about 170 languages a day, and the top 10
+        # carry 95% of them. Serving every language put a 7-day hourly
+        # response past max_rows within days. The fold ranks languages by
+        # their total over the range, so every bucket carries the same series.
+        # It runs in DuckDB over rows the view already filtered, in one scan.
+        5m:
+          sql: |
+            SELECT bucket,
+                   CASE WHEN lang_rank <= least(greatest(coalesce($top, 10), 1), 50) THEN lang ELSE 'other' END AS lang,
+                   sum(posts)::BIGINT AS posts
+            FROM (
+              SELECT bucket, lang, posts,
+                     dense_rank() OVER (ORDER BY lang_total DESC, lang) AS lang_rank
+              FROM (
+                SELECT bucket, lang, posts, sum(posts) OVER (PARTITION BY lang) AS lang_total
+                FROM pg.posts_per_5m_by_lang
+                WHERE bucket >= greatest(coalesce($since, now() - INTERVAL '12 hours'), now() - INTERVAL '7 days')
+                  AND bucket <  coalesce($until, now())
+                  AND lang = coalesce($lang, lang)
+              )
+            )
+            GROUP BY ALL
+            ORDER BY bucket, lang
+        1h:
+          sql: |
+            SELECT bucket,
+                   CASE WHEN lang_rank <= least(greatest(coalesce($top, 10), 1), 50) THEN lang ELSE 'other' END AS lang,
+                   sum(posts)::BIGINT AS posts
+            FROM (
+              SELECT bucket, lang, posts,
+                     dense_rank() OVER (ORDER BY lang_total DESC, lang) AS lang_rank
+              FROM (
+                SELECT bucket, lang, posts, sum(posts) OVER (PARTITION BY lang) AS lang_total
+                FROM pg.posts_per_hour_by_lang
+                WHERE bucket >= greatest(coalesce($since, now() - INTERVAL '7 days'), now() - INTERVAL '30 days')
+                  AND bucket <  coalesce($until, now())
+                  AND lang = coalesce($lang, lang)
+              )
+            )
+            GROUP BY ALL
+            ORDER BY bucket, lang
+        1d:
+          sql: |
+            SELECT bucket,
+                   CASE WHEN lang_rank <= least(greatest(coalesce($top, 10), 1), 50) THEN lang ELSE 'other' END AS lang,
+                   sum(posts)::BIGINT AS posts
+            FROM (
+              SELECT bucket, lang, posts,
+                     dense_rank() OVER (ORDER BY lang_total DESC, lang) AS lang_rank
+              FROM (
+                SELECT bucket, lang, posts, sum(posts) OVER (PARTITION BY lang) AS lang_total
+                FROM pg.posts_per_day_by_lang
+                WHERE bucket >= greatest(coalesce($since, now() - INTERVAL '30 days'), now() - INTERVAL '365 days')
+                  AND bucket <  coalesce($until, now())
+                  AND lang = coalesce($lang, lang)
+              )
+            )
+            GROUP BY ALL
+            ORDER BY bucket, lang

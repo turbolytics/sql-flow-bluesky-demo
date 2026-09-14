@@ -60,6 +60,54 @@ jobs:
             SELECT first_bucket, latest_bucket, last_write_at,
                    minutes_observed, total_posts
             FROM pipeline_status"
+          for view in posts_per_5m_by_lang posts_per_hour_by_lang posts_per_day_by_lang; do
+            psql "$SQLFLOW_POSTGRES_URI" -v ON_ERROR_STOP=1 -c "
+              SELECT bucket, lang, posts FROM $view WHERE false"
+          done
+
+      # Two minutes either side of UTC midnight, read back from a session in
+      # Asia/Kolkata. date_trunc's two-argument form truncates in the session
+      # zone and would put the day at 18:30 UTC and the hour at :30. The API
+      # serves UTC buckets whatever zone a DuckDB connection happens to open in.
+      - name: The rollup views bucket in UTC whatever the session zone
+        run: |
+          psql "$SQLFLOW_POSTGRES_URI" -v ON_ERROR_STOP=1 -c "
+            INSERT INTO posts_per_minute_by_lang (bucket, lang, posts) VALUES
+              ('2026-09-10 23:59:00+00', 'en', 1),
+              ('2026-09-11 00:04:00+00', 'en', 2)"
+          got=$(PGTZ=Asia/Kolkata psql "$SQLFLOW_POSTGRES_URI" -v ON_ERROR_STOP=1 -tA -c "
+            SELECT string_agg(grain || ' ' || to_char(bucket AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI') || ' ' || posts,
+                              ', ' ORDER BY grain, bucket)
+            FROM (
+              SELECT '5m' AS grain, bucket, posts FROM posts_per_5m_by_lang
+              UNION ALL SELECT '1h', bucket, posts FROM posts_per_hour_by_lang
+              UNION ALL SELECT '1d', bucket, posts FROM posts_per_day_by_lang
+            ) AS v")
+          want="1d 2026-09-10 00:00 1, 1d 2026-09-11 00:00 2, 1h 2026-09-10 23:00 1, 1h 2026-09-11 00:00 2, 5m 2026-09-10 23:55 1, 5m 2026-09-11 00:00 2"
+          if [ "$got" != "$want" ]; then
+            printf 'views bucket wrong\n got: %s\nwant: %s\n' "$got" "$want" >&2
+            exit 1
+          fi
+          psql "$SQLFLOW_POSTGRES_URI" -v ON_ERROR_STOP=1 -c "TRUNCATE posts_per_minute_by_lang"
+
+      # With sequential scans off, a view whose filter no index serves still
+      # plans a Seq Scan. An index whose expression drifts from its view's
+      # would pass every other check and scan the whole table on every request.
+      - name: Each rollup view's range filter uses its index
+        run: |
+          for pair in posts_per_5m_by_lang:posts_per_minute_by_lang_5m_idx \
+                      posts_per_hour_by_lang:posts_per_minute_by_lang_hour_idx \
+                      posts_per_day_by_lang:posts_per_minute_by_lang_day_idx; do
+            view=${pair%%:*}; index=${pair##*:}
+            plan=$(psql "$SQLFLOW_POSTGRES_URI" -v ON_ERROR_STOP=1 -tA -c "
+              SET enable_seqscan = off;
+              EXPLAIN (COSTS OFF) SELECT bucket, lang, posts FROM $view
+              WHERE bucket >= now() - INTERVAL '12 hours' AND bucket < now()")
+            if ! grep -q "Index Scan on $index\|Index Scan using $index" <<<"$plan"; then
+              printf '%s does not use %s:\n%s\n' "$view" "$index" "$plan" >&2
+              exit 1
+            fi
+          done
 
   image:
     runs-on: ubuntu-latest
@@ -71,9 +119,101 @@ jobs:
       - name: Validate pipeline.yml
         run: |
           docker run --rm -v "$PWD/pipeline.yml:/app/pipeline.yml" \
-            turbolytics/sql-flow:v1.2.0 validate /app/pipeline.yml
+            turbolytics/sql-flow:v2026.09.14 validate /app/pipeline.yml
+
+      # Without secrets: an unset token or URI is a warning, not a failure.
+      - name: Validate serve.yml
+        run: |
+          docker run --rm -v "$PWD/serve.yml:/app/serve.yml" \
+            turbolytics/sql-flow:v2026.09.14 validate /app/serve.yml
 
       # Render builds this Dockerfile on deploy. Building it here keeps a broken
       # image from passing the checks that gate the deploy.
       - name: Build the worker image
         run: docker build -t sqlflow-bluesky-demo .
+
+  # The only place the API's attachment path runs end to end: the image,
+  # bin/serve.sh, the migrations, DuckDB's Postgres extension and serve.yml's
+  # SQL against real views. sql-flow's own tests run without Postgres.
+  api:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        # Matches the Render database's major version.
+        image: postgres:18
+        env:
+          POSTGRES_USER: bluesky
+          POSTGRES_PASSWORD: bluesky
+          POSTGRES_DB: bluesky
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U bluesky -d bluesky"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+    env:
+      SQLFLOW_POSTGRES_URI: postgresql://bluesky:bluesky@localhost:5432/bluesky
+      TOKEN: ci-token
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the image
+        run: docker build -t sqlflow-bluesky-demo .
+
+      - name: Start the API
+        run: |
+          docker run -d --name api --network host \
+            -e SQLFLOW_POSTGRES_URI \
+            -e SQLFLOW_SERVE_TOKEN_BLUESKY_DEMO="$TOKEN" \
+            --entrypoint /app/bin/serve.sh sqlflow-bluesky-demo
+          for _ in $(seq 1 60); do
+            if curl -sf localhost:8080/healthz; then exit 0; fi
+            sleep 2
+          done
+          docker logs api
+          exit 1
+
+      # Three minutes in one hour, two languages. With top=1 the fold keeps en
+      # and sums ja into other; with lang=ja, ja comes back unfolded.
+      - name: The API serves the rollups
+        run: |
+          fail() { echo "$1" >&2; docker logs api; exit 1; }
+          hour=$(date -u -d '-2 hours' +%Y-%m-%dT%H:00:00Z)
+          next=$(date -u -d "$hour +1 hour" +%Y-%m-%dT%H:00:00Z)
+          psql "$SQLFLOW_POSTGRES_URI" -v ON_ERROR_STOP=1 -c "
+            INSERT INTO posts_per_minute_by_lang (bucket, lang, posts) VALUES
+              ('$hour'::timestamptz + INTERVAL '1 minute', 'en', 5),
+              ('$hour'::timestamptz + INTERVAL '2 minutes', 'en', 7),
+              ('$hour'::timestamptz + INTERVAL '1 minute', 'ja', 3)"
+
+          api() { curl -s -o body.json -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "localhost:8080/v1/datasets$1"; }
+
+          [ "$(api '')" = 200 ] || fail "listing: $(cat body.json)"
+          jq -e '[.datasets[].name] == ["pipeline_status", "posts_by_lang"]
+                 and (.datasets[1].grains | keys) == ["1d", "1h", "5m"]' body.json \
+            || fail "listing: $(cat body.json)"
+
+          [ "$(api "/posts_by_lang?grain=1h&top=1&since=$hour&until=$next")" = 200 ] || fail "1h: $(cat body.json)"
+          jq -e --arg b "$hour" '.rows == [
+                 {"bucket": $b, "lang": "en", "posts": 12},
+                 {"bucket": $b, "lang": "other", "posts": 3}]' body.json \
+            || fail "1h top=1: $(cat body.json)"
+
+          [ "$(api "/posts_by_lang?grain=1h&lang=ja&since=$hour&until=$next")" = 200 ] || fail "1h ja: $(cat body.json)"
+          jq -e --arg b "$hour" '.rows == [{"bucket": $b, "lang": "ja", "posts": 3}]' body.json \
+            || fail "1h lang=ja: $(cat body.json)"
+
+          [ "$(api '/pipeline_status')" = 200 ] || fail "status: $(cat body.json)"
+          jq -e '.rows[0].total_posts == 15 and .rows[0].minutes_observed == 2' body.json \
+            || fail "status: $(cat body.json)"
+
+          [ "$(api '/posts_by_lang')" = 400 ] || fail "no grain: $(cat body.json)"
+          jq -e '.error.code == "missing_grain"' body.json || fail "no grain: $(cat body.json)"
+
+          code=$(curl -s -o body.json -w '%{http_code}' localhost:8080/v1/datasets/pipeline_status)
+          [ "$code" = 401 ] || fail "no token: $code $(cat body.json)"
+
+      - name: API logs
+        if: always()
+        run: docker logs api || true
