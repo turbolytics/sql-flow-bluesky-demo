@@ -302,7 +302,7 @@ reports badly, migrate, `exec` so SIGTERM reaches sqlflow and the drain runs.
 ## Dockerfile
 
 Three changes: `COPY serve.yml /app/serve.yml`; the pin moves from `v1.2.0`
-to `v1.3.0`, the sql-flow release that ships `serve`; and the base image is an
+to `v2026.09.14`, the sql-flow release that ships `serve`; and the base image is an
 `ARG SQLFLOW_IMAGE` defaulting to that pin, so an unreleased sqlflow build can
 be tried locally with `--build-arg`. Render and CI build with the default. The
 `ENTRYPOINT` stays `entrypoint.sh`. Render's `dockerCommand` overrides it for
