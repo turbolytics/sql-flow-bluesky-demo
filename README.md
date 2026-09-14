@@ -35,6 +35,13 @@ than about moving rows, and it keeps writes low: about 33 rows per minute.
 grace, the idle bound, and what happens to a late row. sqlflow keeps the
 watermark and generates the SQL that collects and deletes closed minutes.
 
+The window writes through sqlflow's `postgres` sink. The sink holds its own
+connection to Postgres and upserts each closed minute on `(bucket, lang)` in
+one transaction, so a write costs the minute, not the table. An earlier
+version wrote through DuckDB's postgres extension. That extension resolves
+`ON CONFLICT` by reading every key of the target table into DuckDB, so the
+worker's memory grew with the table on every write.
+
 The whole pipeline is [`pipeline.yml`](pipeline.yml). DuckDB runs in memory.
 There is no state file.
 
@@ -49,7 +56,7 @@ One table and four views.
 | `bucket` | `timestamptz` | Start of the minute, in event time. |
 | `lang` | `text` | The post's first language tag, or `unknown`. |
 | `posts` | `integer` | Posts created in that minute with that language. |
-| `updated_at` | `timestamptz` | Wall-clock time of the last write to the row. |
+| `updated_at` | `timestamptz` | Wall-clock time the minute was first written, from the Postgres clock. A republished minute keeps it. |
 
 The primary key is `(bucket, lang)`.
 
@@ -225,7 +232,7 @@ The worker applies the migrations, then starts streaming:
 ```
 applied  0001_posts_per_minute_by_lang
 applied  0002_pipeline_status_view
-... Executing command step {"name": "attach postgres"}
+... Executing command step {"name": "declare the post schema"}
 ... starting watermark manager {"table": "posts_per_minute_by_lang", "poll_interval": "10s"}
 ... throughput {"messages_consumed": 199, "total_throughput_per_second": 40.9}
 ```
