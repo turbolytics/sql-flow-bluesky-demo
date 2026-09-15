@@ -6,17 +6,6 @@ commands:
     sql: |
       SET TimeZone='UTC';
 
-  - name: load postgres extension
-    sql: |
-      INSTALL postgres;
-      LOAD postgres;
-
-  # No default: a worker without a database must fail at startup, not attach
-  # to some other host.
-  - name: attach postgres
-    sql: |
-      ATTACH '{{ SQLFLOW_POSTGRES_URI }}' AS pg (TYPE POSTGRES);
-
   # Only the fields the handler reads. StructuredBatch loads each batch into
   # this table, so an unused field is parsing work for nothing.
   - name: declare the post schema
@@ -64,6 +53,7 @@ tables:
       # replaces the minute's count with theirs: in a local run, one late post
       # turned a published count of 5 into 1. drop discards the row, logs
       # "dropped late rows", and counts it in window_late_rows_total.
+      # sqlflow validate refuses reemit with an upserting postgres sink.
       window:
         time_column: bucket
         size_seconds: 60
@@ -72,34 +62,47 @@ tables:
         late_rows: drop
         poll_interval_seconds: 10
         # One row per minute and language. The table holds one row per batch,
-        # and the Postgres upsert below must not see the same key twice in one
-        # statement.
+        # so a minute's count is the sum of them. The sink keeps only the last
+        # row it is handed for a key, so an unsummed minute would publish one
+        # batch's count.
         emit_sql: |
           SELECT bucket, lang, sum(posts)::INTEGER AS posts
           FROM closed
           GROUP BY bucket, lang
 
         sink:
-          type: sqlcommand
-          sqlcommand:
-            # ON CONFLICT is what makes at-least-once delivery survivable. A
-            # minute can reach Postgres twice: the sink retries a write that
-            # timed out or lost its connection, which may already have landed,
-            # and a close whose delete conflicts with the pipeline rolls back
-            # and publishes the same minute on the next poll. Against the
-            # primary key a bare INSERT fails that second write, and a failed
-            # write stops the worker.
-            #
-            # updated_at is listed and selected as now() on purpose. The
-            # postgres extension sends rows that do not conflict through a
-            # COPY, and that COPY passes an explicit NULL for any column this
-            # list omits. An explicit NULL defeats the column's DEFAULT, so
-            # omitting updated_at fails the NOT NULL on every new minute.
-            sql: |
-              INSERT INTO pg.posts_per_minute_by_lang (bucket, lang, posts, updated_at)
-              SELECT bucket, lang, posts, now() FROM sqlflow_sink_batch
-              ON CONFLICT (bucket, lang) DO UPDATE
-                SET posts = EXCLUDED.posts, updated_at = EXCLUDED.updated_at
+          # The postgres sink writes each closed minute at the cost of the
+          # minute: a COPY into a session temp table, then a server-side
+          # INSERT ... ON CONFLICT (bucket, lang) DO UPDATE, in one
+          # transaction.
+          #
+          # It replaces a sqlcommand upsert through the DuckDB postgres
+          # extension, which grew the worker's memory on every flush. The
+          # extension does not send ON CONFLICT to Postgres: it copies the key
+          # columns of the whole target table into DuckDB and resolves the
+          # conflict there. This table gains a row per language every minute
+          # and is never trimmed, so each flush read more than the last.
+          # Measured in turbolytics/sql-flow#290.
+          #
+          # upsert on the primary key is what makes at-least-once delivery
+          # survivable. A minute can reach Postgres twice: the sink retries a
+          # write that timed out, which may already have landed, and a close
+          # whose delete conflicts with the pipeline rolls back and publishes
+          # the minute again. The second write replaces the first. The sink
+          # checks at startup that a unique index covers exactly the key.
+          #
+          # updated_at is not in the batch. The insert names only the batch's
+          # columns, so a new minute takes the column's DEFAULT now() from the
+          # Postgres clock, and a republished minute keeps the time of its
+          # first write.
+          type: postgres
+          postgres:
+            # No default: a worker without a database must fail at startup,
+            # not write to some other host.
+            dsn: "{{ SQLFLOW_POSTGRES_URI }}"
+            table: posts_per_minute_by_lang
+            mode: upsert
+            key: [bucket, lang]
 
 pipeline:
   name: bluesky-posts-per-minute-by-lang

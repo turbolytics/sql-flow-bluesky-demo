@@ -119,13 +119,13 @@ jobs:
       - name: Validate pipeline.yml
         run: |
           docker run --rm -v "$PWD/pipeline.yml:/app/pipeline.yml" \
-            turbolytics/sql-flow:v2026.09.14 validate /app/pipeline.yml
+            turbolytics/sql-flow:v2026.09.14.1 validate /app/pipeline.yml
 
       # Without secrets: an unset token or URI is a warning, not a failure.
       - name: Validate serve.yml
         run: |
           docker run --rm -v "$PWD/serve.yml:/app/serve.yml" \
-            turbolytics/sql-flow:v2026.09.14 validate /app/serve.yml
+            turbolytics/sql-flow:v2026.09.14.1 validate /app/serve.yml
 
       # Render builds this Dockerfile on deploy. Building it here keeps a broken
       # image from passing the checks that gate the deploy.
