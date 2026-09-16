@@ -1,0 +1,56 @@
+# The rollups Postgres keeps from the pipeline's minute table, and the dataset
+# the API serves from them.
+#
+#   make rollups    regenerates migrations/0005_rollups.sql and prints the
+#                   posts_by_lang dataset for serve.yml
+#
+# CI runs `sqlflow rollup check`, which fails when either generated file
+# differs from what this file generates.
+rollups:
+  - name: posts
+    source:
+      table: posts_per_minute_by_lang
+      time_column: bucket
+      grain: 1m
+      dimensions: [lang]
+
+    # Each grain a few times the one below it, so a re-merge reads few rows
+    # and a chart that crosses to the next grain keeps its shape.
+    grains:
+      5m: {from: 1m}
+      15m: {from: 5m}
+      1h: {from: 15m}
+      6h: {from: 1h}
+      1d: {from: 6h}
+
+    dimension_sets:
+      - name: posts_by_lang
+        dimensions: [lang]
+        measures:
+          posts: {type: sum, column: posts}
+      # One row per bucket: pipeline_status reads its totals and minutes
+      # observed from here instead of scanning the minute table.
+      - name: posts_total
+        dimensions: []
+        measures:
+          posts: {type: sum, column: posts}
+          minutes: {type: count_buckets}
+
+    serve:
+      catalog: pg
+      # About 300 points per chart. 365 buckets × 21 series (top 20 and
+      # other) stays under max_rows 10000.
+      max_buckets: 365
+      datasets:
+        - name: posts_by_lang
+          dimension_set: posts_by_lang
+          description: >-
+            Posts per bucket per language. The top languages by posts over the
+            range keep their own series and the rest sum into lang "other";
+            top sets how many, default 10, between 1 and 20. since and until
+            bound the range, default the last 24 hours, and pick the grain.
+            lang returns one language, never folded.
+          default_range: 24h
+          max_range: {1m: 6h, 5m: 1d, 15m: 3d, 1h: 14d, 6h: 90d, 1d: 365d}
+          fold: {dimension: lang, top: {default: 10, max: 20}}
+          filters: {lang: lang}

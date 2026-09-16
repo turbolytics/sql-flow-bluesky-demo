@@ -64,14 +64,21 @@ jobs:
             psql "$SQLFLOW_POSTGRES_URI" -v ON_ERROR_STOP=1 -c "
               SELECT bucket, lang, posts FROM $view WHERE false"
           done
+          for grain in 5m 15m 1h 6h 1d; do
+            psql "$SQLFLOW_POSTGRES_URI" -v ON_ERROR_STOP=1 -c "
+              SELECT bucket, lang, posts FROM posts_by_lang_$grain WHERE false"
+            psql "$SQLFLOW_POSTGRES_URI" -v ON_ERROR_STOP=1 -c "
+              SELECT bucket, minutes, posts FROM posts_total_$grain WHERE false"
+          done
 
-      # Two minutes either side of UTC midnight, read back from a session in
-      # Asia/Kolkata. date_trunc's two-argument form truncates in the session
-      # zone and would put the day at 18:30 UTC and the hour at :30. The API
-      # serves UTC buckets whatever zone a DuckDB connection happens to open in.
-      - name: The rollup views bucket in UTC whatever the session zone
+      # Two minutes either side of UTC midnight, written from a session in
+      # Asia/Kolkata, so the write and its triggers both run in that zone. A
+      # bucket expression that truncates in the session zone would put the day
+      # at 18:30 UTC and the hour at :30. The API serves UTC buckets whatever
+      # zone a writer or a DuckDB connection happens to open in.
+      - name: The rollups bucket in UTC whatever the session zone
         run: |
-          psql "$SQLFLOW_POSTGRES_URI" -v ON_ERROR_STOP=1 -c "
+          PGTZ=Asia/Kolkata psql "$SQLFLOW_POSTGRES_URI" -v ON_ERROR_STOP=1 -c "
             INSERT INTO posts_per_minute_by_lang (bucket, lang, posts) VALUES
               ('2026-09-10 23:59:00+00', 'en', 1),
               ('2026-09-11 00:04:00+00', 'en', 2)"
@@ -79,13 +86,54 @@ jobs:
             SELECT string_agg(grain || ' ' || to_char(bucket AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI') || ' ' || posts,
                               ', ' ORDER BY grain, bucket)
             FROM (
-              SELECT '5m' AS grain, bucket, posts FROM posts_per_5m_by_lang
-              UNION ALL SELECT '1h', bucket, posts FROM posts_per_hour_by_lang
-              UNION ALL SELECT '1d', bucket, posts FROM posts_per_day_by_lang
+              SELECT '5m' AS grain, bucket, posts FROM posts_by_lang_5m
+              UNION ALL SELECT '15m', bucket, posts FROM posts_by_lang_15m
+              UNION ALL SELECT '1h', bucket, posts FROM posts_by_lang_1h
+              UNION ALL SELECT '6h', bucket, posts FROM posts_by_lang_6h
+              UNION ALL SELECT '1d', bucket, posts FROM posts_by_lang_1d
             ) AS v")
-          want="1d 2026-09-10 00:00 1, 1d 2026-09-11 00:00 2, 1h 2026-09-10 23:00 1, 1h 2026-09-11 00:00 2, 5m 2026-09-10 23:55 1, 5m 2026-09-11 00:00 2"
+          want="15m 2026-09-10 23:45 1, 15m 2026-09-11 00:00 2, 1d 2026-09-10 00:00 1, 1d 2026-09-11 00:00 2, 1h 2026-09-10 23:00 1, 1h 2026-09-11 00:00 2, 5m 2026-09-10 23:55 1, 5m 2026-09-11 00:00 2, 6h 2026-09-10 18:00 1, 6h 2026-09-11 00:00 2"
           if [ "$got" != "$want" ]; then
-            printf 'views bucket wrong\n got: %s\nwant: %s\n' "$got" "$want" >&2
+            printf 'rollups bucket wrong\n got: %s\nwant: %s\n' "$got" "$want" >&2
+            exit 1
+          fi
+
+      # The triggers keep every grain equal to the minute table, including a
+      # minute republished with a new count, which the pipeline's at-least-once
+      # writes produce. Deletes do not propagate, so this runs before the
+      # truncate below.
+      - name: Every rollup equals the minute table
+        run: |
+          psql "$SQLFLOW_POSTGRES_URI" -v ON_ERROR_STOP=1 -c "
+            INSERT INTO posts_per_minute_by_lang (bucket, lang, posts) VALUES
+              ('2026-09-11 00:04:00+00', 'ja', 7),
+              ('2026-09-11 06:30:00+00', 'en', 11)"
+          psql "$SQLFLOW_POSTGRES_URI" -v ON_ERROR_STOP=1 -c "
+            INSERT INTO posts_per_minute_by_lang (bucket, lang, posts)
+            VALUES ('2026-09-11 00:04:00+00', 'en', 99)
+            ON CONFLICT (bucket, lang) DO UPDATE SET posts = excluded.posts"
+          for pair in 5m:'5 minutes' 15m:'15 minutes' 1h:'1 hour' 6h:'6 hours' 1d:'24 hours'; do
+            grain=${pair%%:*}; width=${pair##*:}
+            diff=$(psql "$SQLFLOW_POSTGRES_URI" -v ON_ERROR_STOP=1 -tA -c "
+              WITH src AS (
+                SELECT date_bin(INTERVAL '$width', bucket, TIMESTAMPTZ '2000-01-01 00:00:00+00') AS bucket,
+                       lang, sum(posts)::bigint AS posts
+                FROM posts_per_minute_by_lang GROUP BY 1, 2)
+              SELECT count(*) FROM (
+                (TABLE src EXCEPT SELECT bucket, lang, posts FROM posts_by_lang_$grain)
+                UNION ALL
+                (SELECT bucket, lang, posts FROM posts_by_lang_$grain EXCEPT TABLE src)) AS d")
+            if [ "$diff" != "0" ]; then
+              echo "posts_by_lang_$grain differs from the minute table in $diff rows" >&2
+              exit 1
+            fi
+          done
+          got=$(psql "$SQLFLOW_POSTGRES_URI" -v ON_ERROR_STOP=1 -tA -c "
+            SELECT minutes_observed || ' ' || total_posts FROM pipeline_status")
+          want=$(psql "$SQLFLOW_POSTGRES_URI" -v ON_ERROR_STOP=1 -tA -c "
+            SELECT count(DISTINCT bucket) || ' ' || sum(posts) FROM posts_per_minute_by_lang")
+          if [ "$got" != "$want" ]; then
+            printf 'pipeline_status wrong\n got: %s\nwant: %s\n' "$got" "$want" >&2
             exit 1
           fi
           psql "$SQLFLOW_POSTGRES_URI" -v ON_ERROR_STOP=1 -c "TRUNCATE posts_per_minute_by_lang"
@@ -119,13 +167,28 @@ jobs:
       - name: Validate pipeline.yml
         run: |
           docker run --rm -v "$PWD/pipeline.yml:/app/pipeline.yml" \
-            turbolytics/sql-flow:v2026.09.14.1 validate /app/pipeline.yml
+            turbolytics/sql-flow:v2026.09.16 validate /app/pipeline.yml
 
       # Without secrets: an unset token or URI is a warning, not a failure.
       - name: Validate serve.yml
         run: |
           docker run --rm -v "$PWD/serve.yml:/app/serve.yml" \
-            turbolytics/sql-flow:v2026.09.14.1 validate /app/serve.yml
+            turbolytics/sql-flow:v2026.09.16 validate /app/serve.yml
+
+      - name: Validate rollups.yml
+        run: |
+          docker run --rm -v "$PWD/rollups.yml:/app/rollups.yml" \
+            turbolytics/sql-flow:v2026.09.16 validate /app/rollups.yml
+
+      # migrations/0005_rollups.sql and serve.yml's posts_by_lang dataset are
+      # generated. This is what makes editing either by hand, or changing
+      # rollups.yml without regenerating them, fail here rather than in
+      # production.
+      - name: The generated rollup files match rollups.yml
+        run: |
+          docker run --rm -v "$PWD:/w" -w /w turbolytics/sql-flow:v2026.09.16 \
+            rollup check -c rollups.yml \
+              --migration migrations/0005_rollups.sql --serve serve.yml
 
       # Render builds this Dockerfile on deploy. Building it here keeps a broken
       # image from passing the checks that gate the deploy.
@@ -191,7 +254,9 @@ jobs:
 
           [ "$(api '')" = 200 ] || fail "listing: $(cat body.json)"
           jq -e '[.datasets[].name] == ["pipeline_status", "posts_by_lang"]
-                 and (.datasets[1].grains | keys) == ["1d", "1h", "5m"]' body.json \
+                 and (.datasets[1].grains | keys) == ["15m", "1d", "1h", "1m", "5m", "6h"]
+                 and .datasets[1].range.default == "24h"
+                 and (.datasets[1].params[] | select(.name == "top") | .min == 1 and .max == 20)' body.json \
             || fail "listing: $(cat body.json)"
 
           [ "$(api "/posts_by_lang?grain=1h&top=1&since=$hour&until=$next")" = 200 ] || fail "1h: $(cat body.json)"
@@ -208,8 +273,26 @@ jobs:
           jq -e '.rows[0].total_posts == 15 and .rows[0].minutes_observed == 2' body.json \
             || fail "status: $(cat body.json)"
 
-          [ "$(api '/posts_by_lang')" = 400 ] || fail "no grain: $(cat body.json)"
-          jq -e '.error.code == "missing_grain"' body.json || fail "no grain: $(cat body.json)"
+          # Without a grain the server picks one from the range: the default 24
+          # hours is served by 5m, and two days by 15m. A page asks for a
+          # window and gets the finest grain that covers it.
+          [ "$(api '/posts_by_lang')" = 200 ] || fail "no grain: $(cat body.json)"
+          jq -e '.grain == "5m" and (.rows | map(.posts) | add) == 15' body.json \
+            || fail "no grain: $(cat body.json)"
+
+          two_days_ago=$(date -u -d '-2 days' +%Y-%m-%dT%H:%M:%SZ)
+          [ "$(api "/posts_by_lang?since=$two_days_ago")" = 200 ] || fail "2 days: $(cat body.json)"
+          jq -e '.grain == "15m"' body.json || fail "2 days: $(cat body.json)"
+
+          # A range wider than the named grain is refused rather than clamped,
+          # and top outside its bounds is refused rather than clamped.
+          week_ago=$(date -u -d '-7 days' +%Y-%m-%dT%H:%M:%SZ)
+          [ "$(api "/posts_by_lang?grain=5m&since=$week_ago")" = 400 ] || fail "7d at 5m: $(cat body.json)"
+          jq -e '.error.code == "range_too_wide"' body.json || fail "7d at 5m: $(cat body.json)"
+
+          [ "$(api '/posts_by_lang?top=21')" = 400 ] || fail "top=21: $(cat body.json)"
+          jq -e '.error.code == "invalid_param" and (.error.message | contains("between 1 and 20"))' body.json \
+            || fail "top=21: $(cat body.json)"
 
           code=$(curl -s -o body.json -w '%{http_code}' localhost:8080/v1/datasets/pipeline_status)
           [ "$code" = 401 ] || fail "no token: $code $(cat body.json)"

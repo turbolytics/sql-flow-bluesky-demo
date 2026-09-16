@@ -83,10 +83,24 @@ $ SELECT lang, posts FROM posts_per_minute_by_lang
  es      |    66
 ```
 
-`posts_per_5m_by_lang`, `posts_per_hour_by_lang` and `posts_per_day_by_lang`
-sum the minutes into coarser buckets, in UTC. The API reads them. Each has an
-index on the minute table matching its bucket expression, so a request reads
-the minutes in its range rather than the whole table.
+Beside the minute table, Postgres keeps ten rollup tables: `posts_by_lang_5m`
+through `posts_by_lang_1d`, one row per bucket per language, and
+`posts_total_5m` through `posts_total_1d`, one row per bucket with the posts
+and the minutes observed in it. Every bucket is UTC. The API reads them, and
+`pipeline_status` reads the daily totals instead of scanning the minute table.
+
+Triggers keep them current. When the pipeline writes a closed minute, a
+statement-level trigger re-merges the 5-minute buckets that write touched, its
+write re-merges the quarter hours, and so on up to the day, all inside the
+pipeline's own transaction. A minute written twice replaces its count at every
+grain rather than adding to it. Deleting a minute changes no rollup, so the
+coarse history outlives any retention on the minute table.
+
+[`rollups.yml`](rollups.yml) declares all of it: the grains, the dimensions,
+the measures, and the dataset the API serves. `migrations/0005_rollups.sql`
+and `serve.yml`'s `posts_by_lang` dataset are generated from it with
+`sqlflow rollup`, and `make validate` fails when either has drifted. Change
+the declaration, run `make rollups`, and commit what it writes.
 
 A minute with no rows is a minute the pipeline was not running. This query
 lists them:
@@ -124,31 +138,47 @@ it in its JavaScript. Browsers may call from `https://turbolytics.io` and
 | `GET /healthz` | `{"status":"ok"}`, no token needed |
 | `GET /v1/datasets` | Every dataset, its params, grains and SQL |
 | `GET /v1/datasets/pipeline_status` | One row: first and latest minute, last write, minutes observed, total posts |
-| `GET /v1/datasets/posts_by_lang?grain=…` | Posts per bucket per language |
+| `GET /v1/datasets/posts_by_lang?since=…&until=…` | Posts per bucket per language |
 
-`posts_by_lang` takes a required `grain` and four optional params:
+`posts_by_lang` takes four optional params and an optional `grain`:
 
 | Param | Type | Meaning |
 |---|---|---|
-| `since` | RFC 3339 timestamp with an offset | Start of the range, inclusive. Encode `+` as `%2B`. |
-| `until` | RFC 3339 timestamp with an offset | End of the range, exclusive. Defaults to now. |
+| `since` | RFC 3339 timestamp with an offset | Start of the range, inclusive. Encode `+` as `%2B`. Defaults to `until` minus 24 hours. |
+| `until` | RFC 3339 timestamp with an offset | End of the range, exclusive. Defaults to the time the request arrived. |
 | `lang` | string | One language, never folded into `other`. |
-| `top` | integer | How many languages keep their own series. Default 10, clamped to 1 through 50. |
+| `top` | integer | How many languages keep their own series. Default 10, and 1 through 20; outside that the request is refused. |
+| `grain` | string | Optional. Without it the API picks the finest grain that covers the range. |
 
 Bluesky tags posts with about 170 languages a day, and the top 10 carry 95%
 of posts. So the top `top` languages by posts over the whole range keep their
 own series, and the rest sum into `lang: "other"`. Every bucket carries the
 same series. A language absent from a bucket has no row; draw it as zero.
 
-| Grain | Reads | Default range | Widest range |
-|---|---|---|---|
-| `5m` | `posts_per_5m_by_lang` | 12 hours | 7 days |
-| `1h` | `posts_per_hour_by_lang` | 7 days | 30 days |
-| `1d` | `posts_per_day_by_lang` | 30 days | 365 days |
+A request names a time range, and the API answers with the finest grain that
+covers it. Each grain serves up to about 300 buckets, which is what a chart
+can draw:
 
-A `since` older than the widest range is raised to it. A response holds at
-most 10,000 rows; `truncated: true` means the range had more, and the rows
-returned are the earliest. Only a full 7 days at `5m` reaches that.
+| Grain | Reads | Widest range | Points at the widest range |
+|---|---|---|---|
+| `1m` | `posts_per_minute_by_lang` | 6 hours | 360 |
+| `5m` | `posts_by_lang_5m` | 1 day | 288 |
+| `15m` | `posts_by_lang_15m` | 3 days | 288 |
+| `1h` | `posts_by_lang_1h` | 14 days | 336 |
+| `6h` | `posts_by_lang_6h` | 90 days | 360 |
+| `1d` | `posts_by_lang_1d` | 365 days | 365 |
+
+So the last hour comes back at `1m` with 60 points, the last 24 hours at `5m`
+with 288, the last 7 days at `1h` with 168, and the last 30 days at `6h` with
+120. The response says which grain it chose and the range it resolved.
+
+Name a `grain` to pin one. A range wider than that grain's widest, or wider
+than every grain's, is `400 range_too_wide`, and the message names the grains
+that would serve it. Nothing is cut from the left of a chart without saying
+so.
+
+A response holds at most 365 buckets × 21 series, under the 10,000-row limit,
+so `truncated` is always `false`.
 
 Output from a local run against two hours of sample minutes:
 
@@ -158,24 +188,25 @@ $ curl -H 'Authorization: Bearer local-dev-token' \
 {
   "dataset": "posts_by_lang",
   "grain": "1h",
+  "range": {"since": "2026-09-13T18:00:00Z", "until": "2026-09-13T20:00:00Z"},
   "columns": [
     {"name": "bucket", "type": "TIMESTAMP WITH TIME ZONE"},
     {"name": "lang", "type": "VARCHAR"},
     {"name": "posts", "type": "BIGINT"}
   ],
   "rows": [
-    {"bucket": "2026-09-13T18:00:00Z", "lang": "en", "posts": 102703},
-    {"bucket": "2026-09-13T18:00:00Z", "lang": "ja", "posts": 14496},
-    {"bucket": "2026-09-13T18:00:00Z", "lang": "other", "posts": 18352},
-    {"bucket": "2026-09-13T18:00:00Z", "lang": "unknown", "posts": 34843},
-    {"bucket": "2026-09-13T19:00:00Z", "lang": "en", "posts": 102360},
-    {"bucket": "2026-09-13T19:00:00Z", "lang": "ja", "posts": 14325},
-    {"bucket": "2026-09-13T19:00:00Z", "lang": "other", "posts": 18353},
-    {"bucket": "2026-09-13T19:00:00Z", "lang": "unknown", "posts": 34735}
+    {"bucket": "2026-09-13T18:00:00Z", "lang": "en", "posts": 102184},
+    {"bucket": "2026-09-13T18:00:00Z", "lang": "ja", "posts": 14584},
+    {"bucket": "2026-09-13T18:00:00Z", "lang": "other", "posts": 11952},
+    {"bucket": "2026-09-13T18:00:00Z", "lang": "unknown", "posts": 34984},
+    {"bucket": "2026-09-13T19:00:00Z", "lang": "en", "posts": 102178},
+    {"bucket": "2026-09-13T19:00:00Z", "lang": "ja", "posts": 14578},
+    {"bucket": "2026-09-13T19:00:00Z", "lang": "other", "posts": 11934},
+    {"bucket": "2026-09-13T19:00:00Z", "lang": "unknown", "posts": 34978}
   ],
   "row_count": 8,
   "truncated": false,
-  "elapsed_ms": 6
+  "elapsed_ms": 8
 }
 
 $ curl -H 'Authorization: Bearer local-dev-token' \
@@ -189,12 +220,12 @@ $ curl -H 'Authorization: Bearer local-dev-token' \
       "latest_bucket": "2026-09-13T19:59:00Z",
       "last_write_at": "2026-09-13T20:01:00Z",
       "minutes_observed": 120,
-      "total_posts": 340167
+      "total_posts": 327372
     }
   ],
   "row_count": 1,
   "truncated": false,
-  "elapsed_ms": 2
+  "elapsed_ms": 5
 }
 ```
 
@@ -203,14 +234,14 @@ Buckets and timestamps are UTC. Rows sort by bucket, then language.
 Every refusal has one shape:
 
 ```
-{"error": {"code": "unknown_grain", "message": "dataset posts_by_lang has no grain 15m; grains: 1d, 1h, 5m"}}
+{"error": {"code": "range_too_wide", "message": "grain 5m serves at most 1d and the range is 168h0m1s; grains that serve it: 1h, 6h, 1d"}}
 ```
 
 A page should handle three statuses:
 
 | Status | Codes | What happened |
 |---|---|---|
-| `400` | `missing_grain`, `unknown_grain`, `unknown_param`, `invalid_param` | The request is wrong. The message names the param or grain. |
+| `400` | `range_too_wide`, `unknown_grain`, `unknown_param`, `invalid_param` | The request is wrong. The message names the param, the grain, or the grains that serve the range. |
 | `401` | `unauthorized` | No token, or not the configured one. |
 | `504` | `query_timeout` | The query took longer than 10 seconds. Retry later. |
 
@@ -260,7 +291,8 @@ Other targets:
 
 | Target | Does |
 |---|---|
-| `make validate` | Checks `pipeline.yml` and `serve.yml` against the pinned sqlflow image. |
+| `make validate` | Checks every config against the pinned sqlflow image, and that the generated rollup files still match `rollups.yml`. |
+| `make rollups` | Regenerates `migrations/0005_rollups.sql` and prints the `posts_by_lang` dataset to paste into `serve.yml`. |
 | `make migrate` | Applies migrations without starting the pipeline. |
 | `make serve` | Starts Postgres and the API. |
 | `make image` | Builds the image the worker and the API share. |
@@ -383,8 +415,11 @@ retention policy yet.
 ## What comes next
 
 - The demo page, reading the API.
-- Choosing the grain from the requested range, so a page asks for a time
-  window and the API picks `5m`, `1h` or `1d`:
-  [turbolytics/sql-flow#284](https://github.com/turbolytics/sql-flow/issues/284).
+- A pool of DuckDB sessions in `sqlflow serve`. The API answers one request at
+  a time, so a slow request makes every request behind it wait; at 16
+  concurrent clients two thirds of requests timed out. The rollups cut what
+  one request costs, and a pool is what lets several run at once.
+- Retention on the minute table. Every minute adds about 33 rows, and the
+  rollups survive a delete, so the coarse history keeps its shape.
 - TurboStats, sqlflow's self-reported process state, to show real uptime
   instead of inferring it from missing minutes.

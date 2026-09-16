@@ -1,14 +1,29 @@
 # The pinned sqlflow image. Must match the Dockerfile and CI.
-SQLFLOW_IMAGE ?= turbolytics/sql-flow:v2026.09.14.1
+SQLFLOW_IMAGE ?= turbolytics/sql-flow:v2026.09.16
 
-.PHONY: validate migrate psql run serve image clean
+.PHONY: validate rollups migrate psql run serve image clean
 
-## validate: check pipeline.yml and serve.yml against the pinned image's schemas
+## validate: check the configs against the pinned image's schemas, and check
+## the generated rollup files still match rollups.yml
 validate:
 	docker run --rm -v $(CURDIR)/pipeline.yml:/app/pipeline.yml \
 		$(SQLFLOW_IMAGE) validate /app/pipeline.yml
 	docker run --rm -v $(CURDIR)/serve.yml:/app/serve.yml \
 		$(SQLFLOW_IMAGE) validate /app/serve.yml
+	docker run --rm -v $(CURDIR)/rollups.yml:/app/rollups.yml \
+		$(SQLFLOW_IMAGE) validate /app/rollups.yml
+	docker run --rm -v $(CURDIR):/w -w /w $(SQLFLOW_IMAGE) rollup check \
+		-c rollups.yml --migration migrations/0005_rollups.sql --serve serve.yml
+
+## rollups: regenerate the migration from rollups.yml and print the dataset to
+## paste into serve.yml. `make validate` fails until both match the file.
+rollups:
+	docker run --rm -v $(CURDIR):/w -w /w $(SQLFLOW_IMAGE) rollup ddl \
+		-c rollups.yml > migrations/0005_rollups.sql
+	@echo "# regenerated migrations/0005_rollups.sql"
+	@echo "# the posts_by_lang dataset for serve.yml, indented by four spaces:"
+	@docker run --rm -v $(CURDIR):/w -w /w $(SQLFLOW_IMAGE) rollup serve \
+		-c rollups.yml | sed 's/^/    /'
 
 ## migrate: apply migrations to the compose database without starting the pipeline
 migrate:
