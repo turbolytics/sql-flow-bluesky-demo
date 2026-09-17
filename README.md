@@ -123,20 +123,23 @@ A second service runs `sqlflow serve` with [`serve.yml`](serve.yml) and
 exposes the rollups as JSON. This section is the contract a page codes
 against.
 
-Every request except `/healthz` sends a bearer token:
+Every request except `/healthz` and `/metrics` sends a client id:
 
 ```
-Authorization: Bearer <token>
+GET /v1/datasets/pipeline_status?client_id=<id>
 ```
 
-The token names the caller in the API's log. It is not a secret: a page ships
-it in its JavaScript. Browsers may call from `https://turbolytics.io` and
+The id names the caller in the API's log. It identifies and does not
+authenticate: a page ships it in its JavaScript, as an analytics snippet ships
+its site key. Everything the API serves is public. With no `Authorization`
+header, a browser sends the request without a CORS preflight. Browsers may
+call from `https://turbolytics.io` and
 `https://www.turbolytics.io`.
 
 | Route | Returns |
 |---|---|
-| `GET /healthz` | `{"status":"ok"}`, no token needed. `HEAD` works too, for monitors |
-| `GET /metrics` | Prometheus text, no token. Counts and latencies per dataset; no row data |
+| `GET /healthz` | `{"status":"ok"}`, no client id needed. `HEAD` works too, for monitors |
+| `GET /metrics` | Prometheus text, no client id. Counts and latencies per dataset; no row data |
 | `GET /v1/datasets` | Every dataset, its params, grains and SQL |
 | `GET /v1/datasets/pipeline_status` | One row: first and latest minute, last write, minutes observed, total posts |
 | `GET /v1/datasets/posts_by_lang?since=…&until=…` | Posts per bucket per language |
@@ -184,8 +187,7 @@ so `truncated` is always `false`.
 Output from a local run against two hours of sample minutes:
 
 ```
-$ curl -H 'Authorization: Bearer local-dev-token' \
-    'localhost:8080/v1/datasets/posts_by_lang?grain=1h&top=3&since=2026-09-13T18:00:00Z&until=2026-09-13T20:00:00Z'
+$ curl 'localhost:8080/v1/datasets/posts_by_lang?client_id=local-dev&grain=1h&top=3&since=2026-09-13T18:00:00Z&until=2026-09-13T20:00:00Z'
 {
   "dataset": "posts_by_lang",
   "grain": "1h",
@@ -210,8 +212,7 @@ $ curl -H 'Authorization: Bearer local-dev-token' \
   "elapsed_ms": 8
 }
 
-$ curl -H 'Authorization: Bearer local-dev-token' \
-    localhost:8080/v1/datasets/pipeline_status
+$ curl 'localhost:8080/v1/datasets/pipeline_status?client_id=local-dev'
 {
   "dataset": "pipeline_status",
   "columns": [...],
@@ -258,7 +259,7 @@ A page should handle three statuses:
 | Status | Codes | What happened |
 |---|---|---|
 | `400` | `range_too_wide`, `unknown_grain`, `unknown_param`, `invalid_param` | The request is wrong. The message names the param, the grain, or the grains that serve the range. |
-| `401` | `unauthorized` | No token, or not the configured one. |
+| `401` | `unauthorized` | No `client_id`, or not the configured one. |
 | `504` | `query_timeout` | The query took longer than 10 seconds. Retry later. |
 
 A `500` with `query_failed` means the database failed; the API's log has the
@@ -300,7 +301,7 @@ To run only the API against the local database:
 make serve
 ```
 
-It listens on `127.0.0.1:8080` with the token `local-dev-token`, which exists
+It listens on `127.0.0.1:8080` with the client id `local-dev`, which exists
 only in `docker-compose.yml`. `make run` starts the API beside the pipeline.
 
 Other targets:
@@ -341,10 +342,12 @@ To deploy:
 Render sets `SQLFLOW_POSTGRES_URI` from the database for both services. You
 enter no secrets.
 
-Render mints the API's token, `SQLFLOW_SERVE_TOKEN_BLUESKY_DEMO`, once, when
-it creates the service. Copy it from the API's Environment page into the page
-that calls the API. To rotate it, edit the variable, redeploy the API, and
-update the page.
+Render mints the page's client id, `SQLFLOW_SERVE_TOKEN_BLUESKY_DEMO`, once,
+when it creates the service. Copy it from the API's Environment page into the
+page that calls the API. To rotate it, edit the variable, redeploy the API,
+and update the page. The variable keeps the name it had when the id was a
+bearer token: Render would mint a new value under a new name, and the
+deployed page's id would stop matching.
 
 On every start, both services apply pending migrations, then run sqlflow. The
 migration script takes a lock, so the two can start together. Render deploys

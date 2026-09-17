@@ -42,7 +42,7 @@ services:
     # The database's region, for the private connection string.
     region: virginia
     # sqlflow serve answers /healthz from its DuckDB connection, without a
-    # token.
+    # client id.
     healthCheckPath: /healthz
     autoDeployTrigger: checksPass
     envVars:
@@ -50,9 +50,12 @@ services:
         fromDatabase:
           name: sqlflow-demo-rollups
           property: connectionString
-      # Render mints the token once, when the service is created. It is an
-      # identity the page ships in its JS, not a secret. Copy it from the
-      # dashboard into the page; rotate it by editing the variable.
+      # The page's client id, sent as ?client_id=. Render mints it once, when
+      # the service is created. It is an identifier the page ships in its JS,
+      # not a secret. Copy it from the dashboard into the page; rotate it by
+      # editing the variable. The key keeps its old name on purpose: a renamed
+      # generateValue key mints a new value, and the deployed page's id would
+      # stop matching.
       - key: SQLFLOW_SERVE_TOKEN_BLUESKY_DEMO
         generateValue: true
       # serve.yml listens on SQLFLOW_SERVE_PORT. PORT tells Render the same

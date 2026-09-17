@@ -167,18 +167,18 @@ jobs:
       - name: Validate pipeline.yml
         run: |
           docker run --rm -v "$PWD/pipeline.yml:/app/pipeline.yml" \
-            turbolytics/sql-flow:v2026.09.17.1 validate /app/pipeline.yml
+            turbolytics/sql-flow:v2026.09.17.2 validate /app/pipeline.yml
 
       # Without secrets: an unset token or URI is a warning, not a failure.
       - name: Validate serve.yml
         run: |
           docker run --rm -v "$PWD/serve.yml:/app/serve.yml" \
-            turbolytics/sql-flow:v2026.09.17.1 validate /app/serve.yml
+            turbolytics/sql-flow:v2026.09.17.2 validate /app/serve.yml
 
       - name: Validate rollups.yml
         run: |
           docker run --rm -v "$PWD/rollups.yml:/app/rollups.yml" \
-            turbolytics/sql-flow:v2026.09.17.1 validate /app/rollups.yml
+            turbolytics/sql-flow:v2026.09.17.2 validate /app/rollups.yml
 
       # migrations/0005_rollups.sql and serve.yml's posts_by_lang dataset are
       # generated. This is what makes editing either by hand, or changing
@@ -186,7 +186,7 @@ jobs:
       # production.
       - name: The generated rollup files match rollups.yml
         run: |
-          docker run --rm -v "$PWD:/w" -w /w turbolytics/sql-flow:v2026.09.17.1 \
+          docker run --rm -v "$PWD:/w" -w /w turbolytics/sql-flow:v2026.09.17.2 \
             rollup check -c rollups.yml \
               --migration migrations/0005_rollups.sql --serve serve.yml
 
@@ -217,7 +217,7 @@ jobs:
           --health-retries 15
     env:
       SQLFLOW_POSTGRES_URI: postgresql://bluesky:bluesky@localhost:5432/bluesky
-      TOKEN: ci-token
+      CLIENT_ID: ci-client
     steps:
       - uses: actions/checkout@v4
 
@@ -228,7 +228,7 @@ jobs:
         run: |
           docker run -d --name api --network host \
             -e SQLFLOW_POSTGRES_URI \
-            -e SQLFLOW_SERVE_TOKEN_BLUESKY_DEMO="$TOKEN" \
+            -e SQLFLOW_SERVE_TOKEN_BLUESKY_DEMO="$CLIENT_ID" \
             --entrypoint /app/bin/serve.sh sqlflow-bluesky-demo
           for _ in $(seq 1 60); do
             if curl -sf localhost:8080/healthz; then exit 0; fi
@@ -250,7 +250,8 @@ jobs:
               ('$hour'::timestamptz + INTERVAL '2 minutes', 'en', 7),
               ('$hour'::timestamptz + INTERVAL '1 minute', 'ja', 3)"
 
-          api() { curl -s -o body.json -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "localhost:8080/v1/datasets$1"; }
+          # -G appends client_id to the query, after any the path already has.
+          api() { curl -s -o body.json -w '%{http_code}' -G --data-urlencode "client_id=$CLIENT_ID" "localhost:8080/v1/datasets$1"; }
 
           [ "$(api '')" = 200 ] || fail "listing: $(cat body.json)"
           jq -e '[.datasets[].name] == ["pipeline_status", "posts_by_lang"]
@@ -295,7 +296,13 @@ jobs:
             || fail "top=21: $(cat body.json)"
 
           code=$(curl -s -o body.json -w '%{http_code}' localhost:8080/v1/datasets/pipeline_status)
-          [ "$code" = 401 ] || fail "no token: $code $(cat body.json)"
+          [ "$code" = 401 ] || fail "no client id: $code $(cat body.json)"
+
+          # The deployed page sends the deprecated bearer header until it moves
+          # to client_id. Delete this check with the sqlflow release that
+          # refuses the header.
+          code=$(curl -s -o body.json -w '%{http_code}' -H "Authorization: Bearer $CLIENT_ID" localhost:8080/v1/datasets/pipeline_status)
+          [ "$code" = 200 ] || fail "bearer header: $code $(cat body.json)"
 
       - name: API logs
         if: always()

@@ -22,7 +22,7 @@ services:
     build:
       context: .
       args:
-        SQLFLOW_IMAGE: ${SQLFLOW_IMAGE:-turbolytics/sql-flow:v2026.09.17.1}
+        SQLFLOW_IMAGE: ${SQLFLOW_IMAGE:-turbolytics/sql-flow:v2026.09.17.2}
     # The healthcheck gate is what lets the entrypoint migrate on start without
     # a retry loop.
     depends_on:
@@ -32,21 +32,21 @@ services:
       SQLFLOW_POSTGRES_URI: postgresql://bluesky:bluesky@postgres:5432/bluesky
       SQLFLOW_LOG_LEVEL: INFO
 
-  # The API. Same image, the serve entrypoint. The token is a fixed local
+  # The API. Same image, the serve entrypoint. The client id is a fixed local
   # string so the README's curl lines work as written; it does not exist on
   # Render.
   api:
     build:
       context: .
       args:
-        SQLFLOW_IMAGE: ${SQLFLOW_IMAGE:-turbolytics/sql-flow:v2026.09.17.1}
+        SQLFLOW_IMAGE: ${SQLFLOW_IMAGE:-turbolytics/sql-flow:v2026.09.17.2}
     entrypoint: /app/bin/serve.sh
     depends_on:
       postgres:
         condition: service_healthy
     environment:
       SQLFLOW_POSTGRES_URI: postgresql://bluesky:bluesky@postgres:5432/bluesky
-      SQLFLOW_SERVE_TOKEN_BLUESKY_DEMO: local-dev-token
+      SQLFLOW_SERVE_TOKEN_BLUESKY_DEMO: local-dev
       SQLFLOW_LOG_LEVEL: INFO
     ports:
       - "127.0.0.1:${API_HOST_PORT:-8080}:8080"
