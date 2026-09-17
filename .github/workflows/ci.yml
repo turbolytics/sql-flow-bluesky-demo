@@ -167,18 +167,18 @@ jobs:
       - name: Validate pipeline.yml
         run: |
           docker run --rm -v "$PWD/pipeline.yml:/app/pipeline.yml" \
-            turbolytics/sql-flow:v2026.09.16 validate /app/pipeline.yml
+            turbolytics/sql-flow:v2026.09.17 validate /app/pipeline.yml
 
       # Without secrets: an unset token or URI is a warning, not a failure.
       - name: Validate serve.yml
         run: |
           docker run --rm -v "$PWD/serve.yml:/app/serve.yml" \
-            turbolytics/sql-flow:v2026.09.16 validate /app/serve.yml
+            turbolytics/sql-flow:v2026.09.17 validate /app/serve.yml
 
       - name: Validate rollups.yml
         run: |
           docker run --rm -v "$PWD/rollups.yml:/app/rollups.yml" \
-            turbolytics/sql-flow:v2026.09.16 validate /app/rollups.yml
+            turbolytics/sql-flow:v2026.09.17 validate /app/rollups.yml
 
       # migrations/0005_rollups.sql and serve.yml's posts_by_lang dataset are
       # generated. This is what makes editing either by hand, or changing
@@ -186,7 +186,7 @@ jobs:
       # production.
       - name: The generated rollup files match rollups.yml
         run: |
-          docker run --rm -v "$PWD:/w" -w /w turbolytics/sql-flow:v2026.09.16 \
+          docker run --rm -v "$PWD:/w" -w /w turbolytics/sql-flow:v2026.09.17 \
             rollup check -c rollups.yml \
               --migration migrations/0005_rollups.sql --serve serve.yml
 

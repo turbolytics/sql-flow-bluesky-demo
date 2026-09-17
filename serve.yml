@@ -44,6 +44,20 @@ serve:
       - name: bluesky-demo-page
         token: "{{ SQLFLOW_SERVE_TOKEN_BLUESKY_DEMO }}"
 
+  # Four requests answer at once. Measured in the release image on Linux: four
+  # concurrent sessions peak at 72 MiB resident on the demo's widest permitted
+  # request, well inside this service's 512 MB. Eight bought no more
+  # throughput than four on a controlled A/B, which is why 4 is the default.
+  pool:
+    size: 4
+
+  # /metrics on the same listener, without a token. The labels name the
+  # datasets, which /v1/datasets already publishes, and no row data is in it.
+  # sqlflow_serve_session_wait_seconds is what says whether the pool is the
+  # limit under load.
+  metrics:
+    enabled: true
+
   limits:
     max_rows: 10000
     timeout_seconds: 10
