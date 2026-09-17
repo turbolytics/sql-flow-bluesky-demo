@@ -4,7 +4,7 @@ set -euo pipefail
 
 # Checked here rather than left to sqlflow. An unset template variable renders
 # as an empty string: ATTACH '' fails without naming the cause, and an empty
-# token fails startup with a rule violation rather than the variable's name.
+# client id fails startup with a rule violation rather than the variable's name.
 if [ -z "${SQLFLOW_POSTGRES_URI:-}" ]; then
   echo "SQLFLOW_POSTGRES_URI is not set" >&2
   exit 2

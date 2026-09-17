@@ -3,7 +3,10 @@
 #   sqlflow serve -c serve.yml
 #
 # SQLFLOW_POSTGRES_URI              required
-# SQLFLOW_SERVE_TOKEN_BLUESKY_DEMO  required
+# SQLFLOW_SERVE_TOKEN_BLUESKY_DEMO  required. The page's client id. The name
+#                                   predates client ids and stays: Render
+#                                   minted the value under it, and a renamed
+#                                   key would mint another.
 # SQLFLOW_SERVE_PORT                default 8080
 commands:
   - name: pin the session timezone
@@ -37,12 +40,12 @@ serve:
         - https://turbolytics.io
         - https://www.turbolytics.io
 
-  auth:
-    tokens:
-      # An identity, not a secret: the page ships it in its JS. It exists so
-      # the log names the caller and so the value can be rotated.
-      - name: bluesky-demo-page
-        token: "{{ SQLFLOW_SERVE_TOKEN_BLUESKY_DEMO }}"
+  clients:
+    # An identifier, not a secret: the page ships it in its JS and sends it as
+    # ?client_id=. It exists so the log names the caller and so the value can
+    # be rotated.
+    - name: bluesky-demo-page
+      id: "{{ SQLFLOW_SERVE_TOKEN_BLUESKY_DEMO }}"
 
   # Four requests answer at once. Measured in the release image on Linux: four
   # concurrent sessions peak at 72 MiB resident on the demo's widest permitted
@@ -51,7 +54,7 @@ serve:
   pool:
     size: 4
 
-  # /metrics on the same listener, without a token. The labels name the
+  # /metrics on the same listener, without a client id. The labels name the
   # datasets, which /v1/datasets already publishes, and no row data is in it.
   # sqlflow_serve_session_wait_seconds is what says whether the pool is the
   # limit under load.

@@ -5,7 +5,7 @@
 # An argument so an unreleased sqlflow build can be tried locally:
 #   docker build --build-arg SQLFLOW_IMAGE=turbolytics/sql-flow:<tag> .
 # Render and CI build with the default.
-ARG SQLFLOW_IMAGE=turbolytics/sql-flow:v2026.09.17.1
+ARG SQLFLOW_IMAGE=turbolytics/sql-flow:v2026.09.17.2
 FROM ${SQLFLOW_IMAGE}
 
 # psql applies the migrations. postgresql-client is the only addition.
