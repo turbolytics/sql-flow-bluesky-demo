@@ -51,6 +51,13 @@ rollups:
             bound the range, default the last 24 hours, and pick the grain.
             lang returns one language, never folded.
           default_range: 24h
+          # serve answers repeats of one question from memory for this long. The
+          # page's tabs all ask the same question, a few milliseconds apart.
+          cache_ttl_seconds: 30
+          # The coarse grains change by one open bucket, and their key only
+          # rolls over when a bucket that wide closes, so the TTL alone decides
+          # how often the widest queries run.
+          cache_ttl_by_grain: {1h: 120, 6h: 300, 1d: 600}
           max_range: {1m: 6h, 5m: 1d, 15m: 3d, 1h: 14d, 6h: 90d, 1d: 365d}
           fold: {dimension: lang, top: {default: 10, max: 20}}
           filters: {lang: lang}

@@ -236,6 +236,17 @@ Buckets and timestamps are UTC. Rows sort by bucket, then language.
 free session: the API answers four requests at once, and a fifth waits. Both
 are zero-ish until the API is busy, and `queued_ms` is what grows first.
 
+Both datasets are cached inside the API, so a response also says `"cache":
+"miss"`, `"hit"` or `"shared"`, and `age_ms`, how long ago the query behind it
+started. `since` and `until` are rounded up to the grain's bucket, and `range`
+echoes the rounded values: every tab asking for the last 24 hours inside one
+five-minute window asks one question, and the API runs one query for all of
+them. An answer is served for 30 seconds at the fine grains, up to ten minutes
+at `1d`, and 15 seconds for `pipeline_status`, on top of the seventy seconds
+the pipeline already runs behind. On a hit `queued_ms` and `elapsed_ms` are
+zero: they are this request's, not the original query's. The TTLs live in
+[`rollups.yml`](rollups.yml) and `serve.yml`.
+
 Every refusal has one shape:
 
 ```
@@ -420,10 +431,6 @@ retention policy yet.
 ## What comes next
 
 - The demo page, reading the API.
-- A pool of DuckDB sessions in `sqlflow serve`. The API answers one request at
-  a time, so a slow request makes every request behind it wait; at 16
-  concurrent clients two thirds of requests timed out. The rollups cut what
-  one request costs, and a pool is what lets several run at once.
 - Retention on the minute table. Every minute adds about 33 rows, and the
   rollups survive a delete, so the coarse history keeps its shape.
 - TurboStats, sqlflow's self-reported process state, to show real uptime
