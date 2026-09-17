@@ -64,6 +64,9 @@ serve:
 
   datasets:
     - name: pipeline_status
+      # One row that every tab asks for on every refresh. Fifteen seconds is
+      # small beside the seventy the pipeline already runs behind.
+      cache: {ttl_seconds: 15}
       description: First and latest minute, last write, minutes observed, total posts. One row.
       sql: |
         SELECT first_bucket, latest_bucket, last_write_at,
@@ -75,6 +78,12 @@ serve:
     # hand edit. Each grain reads a rollup table 0005's triggers keep current,
     # 1m reads the minute table, and the server picks the finest grain whose
     # max_range covers the requested range.
+    #
+    # cache and each grain's bucket come from rollups.yml too. since and until
+    # are rounded up to the bucket, so every tab asking for "the last 24 hours"
+    # inside one five-minute window asks one question and costs one query.
+    # That is exact only because this SQL compares the bucket column
+    # half-open; see the sqlflow README before caching a hand-written dataset.
     - name: posts_by_lang
       description: Posts per bucket per language. The top languages by posts over the range keep their own series and the rest sum into lang "other"; top sets how many, default 10, between 1 and 20. since and until bound the range, default the last 24 hours, and pick the grain. lang returns one language, never folded.
       params:
@@ -88,8 +97,13 @@ serve:
           type: integer
           min: 1
           max: 20
+      cache:
+        ttl_seconds: 30
       grains:
         1d:
+          bucket: 1d
+          cache:
+            ttl_seconds: 600
           max_range: 365d
           sql: |
             SELECT bucket,
@@ -108,6 +122,9 @@ serve:
             GROUP BY ALL
             ORDER BY bucket, lang
         1h:
+          bucket: 1h
+          cache:
+            ttl_seconds: 120
           max_range: 14d
           sql: |
             SELECT bucket,
@@ -126,6 +143,7 @@ serve:
             GROUP BY ALL
             ORDER BY bucket, lang
         1m:
+          bucket: 1m
           max_range: 6h
           sql: |
             SELECT bucket,
@@ -144,6 +162,7 @@ serve:
             GROUP BY ALL
             ORDER BY bucket, lang
         5m:
+          bucket: 5m
           max_range: 1d
           sql: |
             SELECT bucket,
@@ -162,6 +181,9 @@ serve:
             GROUP BY ALL
             ORDER BY bucket, lang
         6h:
+          bucket: 6h
+          cache:
+            ttl_seconds: 300
           max_range: 90d
           sql: |
             SELECT bucket,
@@ -180,6 +202,7 @@ serve:
             GROUP BY ALL
             ORDER BY bucket, lang
         15m:
+          bucket: 15m
           max_range: 3d
           sql: |
             SELECT bucket,
