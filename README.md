@@ -135,7 +135,8 @@ it in its JavaScript. Browsers may call from `https://turbolytics.io` and
 
 | Route | Returns |
 |---|---|
-| `GET /healthz` | `{"status":"ok"}`, no token needed |
+| `GET /healthz` | `{"status":"ok"}`, no token needed. `HEAD` works too, for monitors |
+| `GET /metrics` | Prometheus text, no token. Counts and latencies per dataset; no row data |
 | `GET /v1/datasets` | Every dataset, its params, grains and SQL |
 | `GET /v1/datasets/pipeline_status` | One row: first and latest minute, last write, minutes observed, total posts |
 | `GET /v1/datasets/posts_by_lang?since=…&until=…` | Posts per bucket per language |
@@ -230,6 +231,10 @@ $ curl -H 'Authorization: Bearer local-dev-token' \
 ```
 
 Buckets and timestamps are UTC. Rows sort by bucket, then language.
+
+`elapsed_ms` is the query. `queued_ms` is how long the request waited for a
+free session: the API answers four requests at once, and a fifth waits. Both
+are zero-ish until the API is busy, and `queued_ms` is what grows first.
 
 Every refusal has one shape:
 
