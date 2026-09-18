@@ -51,6 +51,44 @@ jobs:
           fi
           grep -q '^skipped ' second.log
 
+      # The failure a Blueprint's first deploy hits and no other path does.
+      # Render resolves fromDatabase as soon as the database record exists, but
+      # the instance is not listening yet; psql exits 2 on the refused
+      # connection and the deploy fails before a migration runs. Compose gates
+      # on service_healthy and the service container above gates on pg_isready,
+      # so only a Postgres started deliberately late can catch a regression.
+      - name: Migrations wait for a database that is not up yet
+        run: |
+          port=5499
+          export SQLFLOW_POSTGRES_URI="postgresql://bluesky:bluesky@127.0.0.1:$port/bluesky"
+          bin/migrate.sh > race.log 2>&1 &
+          migrate_pid=$!
+          sleep 5
+          docker run -d --name migrate-race -p "$port:5432" \
+            -e POSTGRES_USER=bluesky -e POSTGRES_PASSWORD=bluesky \
+            -e POSTGRES_DB=bluesky postgres:18
+          if ! wait "$migrate_pid"; then
+            echo "migrate.sh failed against a database that started late" >&2
+            cat race.log >&2
+            exit 1
+          fi
+          cat race.log
+          grep -q '^applied ' race.log || { echo "no migration applied" >&2; exit 1; }
+          docker rm -f migrate-race
+
+      # Waiting must be bounded. A script that blocks forever on an unreachable
+      # database turns a failed deploy into a deploy that never finishes.
+      - name: Waiting for the database gives up rather than hanging
+        run: |
+          status=0
+          SQLFLOW_MIGRATE_WAIT_SECONDS=5 \
+            SQLFLOW_POSTGRES_URI="postgresql://bluesky:bluesky@127.0.0.1:5598/bluesky" \
+            bin/migrate.sh || status=$?
+          if [ "$status" != 2 ]; then
+            echo "expected status 2 from an unreachable database, got $status" >&2
+            exit 1
+          fi
+
       - name: The schema is what the demo page reads
         run: |
           psql "$SQLFLOW_POSTGRES_URI" -v ON_ERROR_STOP=1 -c "

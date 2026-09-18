@@ -371,7 +371,10 @@ bearer token: Render would mint a new value under a new name, and the
 deployed page's id would stop matching.
 
 On every start, both services apply pending migrations, then run sqlflow. The
-migration script takes a lock, so the two can start together.
+migration script takes a lock, so the two can start together. On a Blueprint's
+first deploy the database is still starting when the services launch, so the
+script waits up to three minutes for it to accept connections before the first
+migration, and gives up rather than hanging if it never does.
 
 ## Configuration
 

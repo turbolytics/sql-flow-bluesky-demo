@@ -12,9 +12,36 @@ if [ -z "${SQLFLOW_POSTGRES_URI:-}" ]; then
   exit 2
 fi
 
-if ! command -v psql >/dev/null; then
-  echo "psql not found on PATH" >&2
-  exit 2
+for tool in psql pg_isready; do
+  if ! command -v "$tool" >/dev/null; then
+    echo "$tool not found on PATH" >&2
+    exit 2
+  fi
+done
+
+# Wait for the database to accept connections before the first psql.
+#
+# Render resolves fromDatabase as soon as the database record exists, but a
+# freshly provisioned instance is not listening yet. psql exits 2 on a refused
+# connection and set -e turns that into a failed deploy, which is what a
+# Blueprint's first deploy hit: "connection to server ... failed: Connection
+# refused", exit 2, before a single migration ran.
+#
+# Nothing caught it earlier because every other way into this script gates on
+# readiness first -- compose on service_healthy, CI on pg_isready -- and on a
+# database that already exists there is nothing to wait for.
+wait_seconds="${SQLFLOW_MIGRATE_WAIT_SECONDS:-180}"
+if ! pg_isready -q -d "$SQLFLOW_POSTGRES_URI"; then
+  echo "waiting up to ${wait_seconds}s for the database to accept connections"
+  deadline=$((SECONDS + wait_seconds))
+  until pg_isready -q -d "$SQLFLOW_POSTGRES_URI"; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      echo "database did not accept connections within ${wait_seconds}s" >&2
+      exit 2
+    fi
+    sleep 2
+  done
+  echo "database is accepting connections"
 fi
 
 cd "$(dirname "$0")/.."
