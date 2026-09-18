@@ -162,6 +162,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # render.yaml is the one config no local run exercises: a mistake in it
+      # surfaces as a failed Blueprint sync, against the live database. The
+      # schema is fetched rather than pinned, so this also catches Render
+      # renaming a plan or retiring a key under a file that still says the old
+      # name.
+      - name: Validate render.yaml
+        run: |
+          pip install --quiet jsonschema pyyaml
+          python3 bin/validate-render.py render.yaml
+
+      # The check above passes when the schema is empty, when the error walk
+      # stops reporting, and when nobody notices it stopped checking. A copy
+      # with a plan Render does not offer has to fail it, with the status that
+      # means invalid: an unreachable schema exits 2 and rejects everything,
+      # which would make this step pass while checking nothing.
+      - name: The render.yaml check rejects a bad plan
+        run: |
+          sed 's/plan: 0.5c-512mb/plan: nonexistent-plan/' render.yaml > bogus.yaml
+          status=0
+          python3 bin/validate-render.py bogus.yaml || status=$?
+          if [ "$status" != 1 ]; then
+            echo "expected the bad plan to be rejected with status 1, got $status" >&2
+            exit 1
+          fi
+
       # Catches a config that no longer parses, which is the failure a pinned
       # image makes rare and a bumped image makes likely.
       - name: Validate pipeline.yml
