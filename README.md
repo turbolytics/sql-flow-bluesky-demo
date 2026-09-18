@@ -331,56 +331,54 @@ Postgres already on 5432. Set `POSTGRES_HOST_PORT` to change it.
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/turbolytics/sql-flow-bluesky-demo)
 
-[`render.yaml`](render.yaml) is a Render Blueprint, and it declares everything
-the demo runs on: a Postgres, the `sqlflow-bluesky` background worker, and the
-`sqlflow-bluesky-api` web service. Both services build the same
+[`render.yaml`](render.yaml) is a Render Blueprint declaring all three
+resources: the Postgres, the `sqlflow-bluesky` worker, and the
+`sqlflow-bluesky-api` web service. Both build the same
 [`Dockerfile`](Dockerfile); the API runs `bin/serve.sh` instead of the worker's
-entrypoint.
+entrypoint. You enter no secrets — Render sets `SQLFLOW_POSTGRES_URI` from the
+database it creates and mints the API's client id. Only the API is public.
 
-The button creates all three. You enter no secrets: Render sets
-`SQLFLOW_POSTGRES_URI` from the database it just made, and mints the API's
-client id itself.
+**It is not free.** Render quoted $21.50 a month in September 2026: a
+`0.1c-256mb` database and two `0.5c-512mb` services, and there is no free plan
+for background workers. Render totals the cost on the confirmation screen
+before it creates anything.
 
-The worker is private, and never gets a URL — it only reads Jetstream and
-writes to Postgres. The web service is public, and everything it serves is
-public too, which is the whole point of the demo.
+### Check it worked
 
-**It is not free.** Render priced this Blueprint at $21.50 a month in
-September 2026: the `0.1c-256mb` database, plus a `0.5c-512mb` worker and a
-`0.5c-512mb` web service. Render has no free plan for background workers, so
-there is no free path to the pipeline itself. The plans in `render.yaml` are
-the ones this demo actually runs on.
+Both services apply migrations on start, waiting for the database while it
+provisions, then run sqlflow.
 
-You do not have to take that number on trust. Render totals the monthly cost
-on the confirmation screen, with every resource it is about to create, before
-anything is created and before you are charged.
-[Render's pricing](https://render.com/pricing) is the current word; the figure
-above is only what it said when this was written. Dropping the API to `plan: free` in
-your own copy leaves just the worker and the database.
+```
+$ curl https://<your-api>.onrender.com/healthz
+{"status":"ok"}
 
-Auto-deploy is off for both services, so a copy in your workspace will not
-redeploy when this repository's `main` moves. Turn it on in the dashboard if
-you want that. The demo's own deploys are started by hand once CI is green.
+$ curl -sG --data-urlencode "client_id=<id>" \
+    https://<your-api>.onrender.com/v1/datasets/pipeline_status
+{"dataset": "pipeline_status",
+ "rows": [{"first_bucket": "2026-09-18T10:28:00Z",
+           "latest_bucket": "2026-09-18T10:30:00Z",
+           "last_write_at": "2026-09-18T10:32:17.493932Z",
+           "minutes_observed": 3, "total_posts": 5138}],
+ "row_count": 1}
+```
 
-The database is declared with the live one's settings — `0.1c-256mb`,
-PostgreSQL 18, `virginia`, 5 GB, autoscaling off. A Blueprint entry whose name
-matches an existing resource adopts it and applies these settings to it, so
-editing one of those fields edits production on the next sync. Storage cannot
-be decreased. The worker, the API and the database share a region because the
-services connect over the database's private network URL.
+Real output from a deploy three minutes old. The client id is
+`SQLFLOW_SERVE_TOKEN_BLUESKY_DEMO` on the API's Environment page; without it
+every route but `/healthz` and `/metrics` answers `401 unauthorized`. Expect no
+rows for the first couple of minutes — a minute reaches Postgres about 70
+seconds after it ends, and the first one is partial.
 
-Render mints the page's client id, `SQLFLOW_SERVE_TOKEN_BLUESKY_DEMO`, once,
-when it creates the service. Copy it from the API's Environment page into the
-page that calls the API. To rotate it, edit the variable, redeploy the API,
-and update the page. The variable keeps the name it had when the id was a
-bearer token: Render would mint a new value under a new name, and the
-deployed page's id would stop matching.
+### Worth knowing
 
-On every start, both services apply pending migrations, then run sqlflow. The
-migration script takes a lock, so the two can start together. On a Blueprint's
-first deploy the database is still starting when the services launch, so the
-script waits up to three minutes for it to accept connections before the first
-migration, and gives up rather than hanging if it never does.
+- Auto-deploy is off, so your copy will not redeploy when this repository's
+  `main` moves.
+- The database is declared with the live demo's settings. A Blueprint entry
+  whose name matches an existing resource adopts it and applies them, and
+  storage cannot be decreased.
+- All three share a region: the services reach the database over its private
+  network URL.
+- Rotate the client id by editing the variable and redeploying. It keeps its
+  old name because a renamed `generateValue` key mints a new value.
 
 ## Configuration
 
