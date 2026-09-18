@@ -9,8 +9,8 @@ pipeline's uptime and streaming progress.
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/turbolytics/sql-flow-bluesky-demo)
 
 One click creates the Postgres, the worker and the API, and asks you for no
-secrets. It is a paid deploy, and it pins a region: see
-[Deploy to Render](#deploy-to-render) for what it creates and what it costs.
+secrets. It is a paid deploy — Render quoted $21.50 a month — and it pins a
+region: see [Deploy to Render](#deploy-to-render) for what it creates.
 
 ## Why this exists
 
@@ -345,12 +345,18 @@ The worker is private, and never gets a URL — it only reads Jetstream and
 writes to Postgres. The web service is public, and everything it serves is
 public too, which is the whole point of the demo.
 
-**It is not free.** Render has no free plan for background workers, so the
-worker costs whatever `0.5c-512mb` costs, as does the API, on top of the
-`0.1c-256mb` database. The plans in `render.yaml` are the ones this demo
-actually runs on; see [Render's pricing](https://render.com/pricing) before
-clicking, and drop the API to `plan: free` in your own copy if you only want
-the pipeline.
+**It is not free.** Render priced this Blueprint at $21.50 a month in
+September 2026: the `0.1c-256mb` database, plus a `0.5c-512mb` worker and a
+`0.5c-512mb` web service. Render has no free plan for background workers, so
+there is no free path to the pipeline itself. The plans in `render.yaml` are
+the ones this demo actually runs on.
+
+You do not have to take that number on trust. Render totals the monthly cost
+on the confirmation screen, with every resource it is about to create, before
+anything is created and before you are charged.
+[Render's pricing](https://render.com/pricing) is the current word; the figure
+above is only what it said when this was written. Dropping the API to `plan: free` in
+your own copy leaves just the worker and the database.
 
 Auto-deploy is off for both services, so a copy in your workspace will not
 redeploy when this repository's `main` moves. Turn it on in the dashboard if
