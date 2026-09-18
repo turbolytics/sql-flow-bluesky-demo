@@ -6,6 +6,12 @@ minute to Postgres. It runs continuously as one background worker on Render.
 The rows it writes are the data behind a public demo page that shows the
 pipeline's uptime and streaming progress.
 
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/turbolytics/sql-flow-bluesky-demo)
+
+One click creates the Postgres, the worker and the API, and asks you for no
+secrets. It is a paid deploy, and it pins a region: see
+[Deploy to Render](#deploy-to-render) for what it creates and what it costs.
+
 ## Why this exists
 
 sqlflow's README shows the Bluesky consumer as a one-file example. This
