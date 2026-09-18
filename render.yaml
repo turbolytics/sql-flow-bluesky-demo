@@ -1,12 +1,29 @@
-# Render Blueprint: a background worker streaming Jetstream into Postgres, and
-# a web service serving the rollups over HTTP from the same image.
+# Render Blueprint: a Postgres, a background worker streaming Jetstream into
+# it, and a web service serving the rollups over HTTP from the worker's image.
 #
-# The database is not declared here. It already exists, and a Blueprint entry
-# with a matching name would apply this file's settings to it, including a
-# plan and major version. fromDatabase may reference a database outside the
-# Blueprint as long as it exists in the workspace. To deploy this elsewhere,
-# create a Postgres named sqlflow-demo-rollups in the same region, or change
-# the name below.
+# Everything the demo needs is declared here, so the Deploy to Render button in
+# the README works in a workspace that has none of it. fromDatabase may
+# reference a database outside the Blueprint, but only one that already exists
+# in that workspace, which is never true for someone deploying their own copy.
+#
+# The database below is the one already running this demo. A Blueprint entry
+# whose name matches an existing resource adopts it and applies these settings
+# to it, so every field here is the live database's current value, read from
+# the dashboard on 2026-09-17. Changing one changes production on the next
+# sync. Storage in particular cannot be decreased.
+databases:
+  - name: sqlflow-demo-rollups
+    plan: 0.1c-256mb
+    # Same region as both services: connectionString is the private-network
+    # URL, which only resolves within one region.
+    region: virginia
+    postgresMajorVersion: "18"
+    diskSizeGB: 5
+    # Off, as it is on the live database. The demo writes about 33 rows a
+    # minute and nothing is deleted yet, so storage is worth watching rather
+    # than growing silently.
+    storageAutoscalingEnabled: false
+
 services:
   - type: worker
     name: sqlflow-bluesky
@@ -18,9 +35,18 @@ services:
     # reachable only from services in the same region. Also the closest region
     # to jetstream2.us-east.
     region: virginia
-    # Deploy only after CI passes. CI applies the migrations twice, so a
-    # migration that is not idempotent never reaches the worker's entrypoint.
-    autoDeployTrigger: checksPass
+    # Off rather than checksPass: this file is also what the README's Deploy to
+    # Render button applies, and a copy of it in someone else's workspace would
+    # otherwise redeploy whenever this repository's main moves.
+    #
+    # This gives up a gate. CI applies the migrations twice, and under
+    # checksPass a migration that is not idempotent could never reach the
+    # worker's entrypoint. CI still runs that check; it is now on whoever
+    # deploys to read it first.
+    #
+    # Quoted: unquoted, YAML reads off as the boolean false, and Render's
+    # schema wants one of the three trigger names.
+    autoDeployTrigger: "off"
     envVars:
       # The private connection string. It never leaves Render and is never
       # committed.
@@ -44,7 +70,8 @@ services:
     # sqlflow serve answers /healthz from its DuckDB connection, without a
     # client id.
     healthCheckPath: /healthz
-    autoDeployTrigger: checksPass
+    # As on the worker above.
+    autoDeployTrigger: "off"
     envVars:
       - key: SQLFLOW_POSTGRES_URI
         fromDatabase:
