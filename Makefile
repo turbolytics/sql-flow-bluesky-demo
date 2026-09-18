@@ -3,9 +3,14 @@ SQLFLOW_IMAGE ?= turbolytics/sql-flow:v2026.09.17.2
 
 .PHONY: validate rollups migrate psql run serve image clean
 
-## validate: check the configs against the pinned image's schemas, and check
-## the generated rollup files still match rollups.yml
+## validate: check the configs against the pinned image's schemas, check
+## render.yaml against Render's published schema, and check the generated
+## rollup files still match rollups.yml
 validate:
+	@command -v uv >/dev/null || { \
+		echo "uv is needed to check render.yaml: https://docs.astral.sh/uv/" >&2; \
+		exit 1; }
+	./bin/validate-render.py render.yaml
 	docker run --rm -v $(CURDIR)/pipeline.yml:/app/pipeline.yml \
 		$(SQLFLOW_IMAGE) validate /app/pipeline.yml
 	docker run --rm -v $(CURDIR)/serve.yml:/app/serve.yml \

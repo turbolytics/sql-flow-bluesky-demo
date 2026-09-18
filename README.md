@@ -308,7 +308,7 @@ Other targets:
 
 | Target | Does |
 |---|---|
-| `make validate` | Checks every config against the pinned sqlflow image, and that the generated rollup files still match `rollups.yml`. |
+| `make validate` | Checks every config against the pinned sqlflow image, checks `render.yaml` against Render's published schema, and checks that the generated rollup files still match `rollups.yml`. Needs [uv](https://docs.astral.sh/uv/) for the `render.yaml` check. |
 | `make rollups` | Regenerates `migrations/0005_rollups.sql` and prints the `posts_by_lang` dataset to paste into `serve.yml`. |
 | `make migrate` | Applies migrations without starting the pipeline. |
 | `make serve` | Starts Postgres and the API. |
@@ -323,24 +323,39 @@ Postgres already on 5432. Set `POSTGRES_HOST_PORT` to change it.
 
 ## Deploy to Render
 
-[`render.yaml`](render.yaml) is a Render Blueprint. It defines two services,
-both built from the [`Dockerfile`](Dockerfile): the `sqlflow-bluesky`
-background worker, and the `sqlflow-bluesky-api` web service, which runs
-`bin/serve.sh` instead of the worker's entrypoint.
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/turbolytics/sql-flow-bluesky-demo)
 
-The Blueprint does not create the database. It connects to an existing Render
-Postgres named `sqlflow-demo-rollups` in the `virginia` region. To deploy your
-own copy, create a Postgres with that name in that region, or change the name
-in `render.yaml`. The worker and the database must share a region, because the
-worker uses the database's private connection string.
+[`render.yaml`](render.yaml) is a Render Blueprint, and it declares everything
+the demo runs on: a Postgres, the `sqlflow-bluesky` background worker, and the
+`sqlflow-bluesky-api` web service. Both services build the same
+[`Dockerfile`](Dockerfile); the API runs `bin/serve.sh` instead of the worker's
+entrypoint.
 
-To deploy:
+The button creates all three. You enter no secrets: Render sets
+`SQLFLOW_POSTGRES_URI` from the database it just made, and mints the API's
+client id itself.
 
-1. In the Render Dashboard, create a new Blueprint and select this repository.
-2. Render reads `render.yaml` and creates the worker and the API.
+The worker is private, and never gets a URL — it only reads Jetstream and
+writes to Postgres. The web service is public, and everything it serves is
+public too, which is the whole point of the demo.
 
-Render sets `SQLFLOW_POSTGRES_URI` from the database for both services. You
-enter no secrets.
+**It is not free.** Render has no free plan for background workers, so the
+worker costs whatever `0.5c-512mb` costs, as does the API, on top of the
+`0.1c-256mb` database. The plans in `render.yaml` are the ones this demo
+actually runs on; see [Render's pricing](https://render.com/pricing) before
+clicking, and drop the API to `plan: free` in your own copy if you only want
+the pipeline.
+
+Auto-deploy is off for both services, so a copy in your workspace will not
+redeploy when this repository's `main` moves. Turn it on in the dashboard if
+you want that. The demo's own deploys are started by hand once CI is green.
+
+The database is declared with the live one's settings — `0.1c-256mb`,
+PostgreSQL 18, `virginia`, 5 GB, autoscaling off. A Blueprint entry whose name
+matches an existing resource adopts it and applies these settings to it, so
+editing one of those fields edits production on the next sync. Storage cannot
+be decreased. The worker, the API and the database share a region because the
+services connect over the database's private network URL.
 
 Render mints the page's client id, `SQLFLOW_SERVE_TOKEN_BLUESKY_DEMO`, once,
 when it creates the service. Copy it from the API's Environment page into the
@@ -350,8 +365,7 @@ bearer token: Render would mint a new value under a new name, and the
 deployed page's id would stop matching.
 
 On every start, both services apply pending migrations, then run sqlflow. The
-migration script takes a lock, so the two can start together. Render deploys
-a commit only after CI passes.
+migration script takes a lock, so the two can start together.
 
 ## Configuration
 
