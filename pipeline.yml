@@ -106,6 +106,16 @@ tables:
 
 pipeline:
   name: bluesky-posts-per-minute-by-lang
+  # Reports this instance to a control plane when
+  # SQLFLOW_TURBOSTATS_REPORT_TO is set, signed with SQLFLOW_TURBOSTATS_KEY.
+  # Empty, the default, reports nowhere. The values are quoted so an unset
+  # variable renders as an empty string, which the pipeline schema reads as
+  # off, and not as null, which it rejects. Needs SQLFlow v2026.09.21 or later.
+  turbostats:
+    id: "{{ SQLFLOW_TURBOSTATS_ID|default('sqlflow-bluesky') }}"
+    report_to: "{{ SQLFLOW_TURBOSTATS_REPORT_TO|default('') }}"
+    key: "{{ SQLFLOW_TURBOSTATS_KEY|default('') }}"
+
   batch_size: 500
 
   source:

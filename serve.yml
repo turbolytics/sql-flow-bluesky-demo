@@ -8,6 +8,12 @@
 #                                   minted the value under it, and a renamed
 #                                   key would mint another.
 # SQLFLOW_SERVE_PORT                default 8080
+# SQLFLOW_TURBOSTATS_REPORT_TO    optional. A control plane's report URL, such
+#                                 as https://ingest.turbolytics.io/v1/turbostats.
+#                                 Empty, the default, reports nowhere.
+# SQLFLOW_TURBOSTATS_KEY          required with a report URL: the credential
+#                                 the control plane issued
+# SQLFLOW_TURBOSTATS_ID           default sqlflow-bluesky-api
 commands:
   - name: pin the session timezone
     sql: |
@@ -32,6 +38,16 @@ commands:
 
 serve:
   name: bluesky-demo-api
+
+  # Reports this instance to a control plane when
+  # SQLFLOW_TURBOSTATS_REPORT_TO is set, signed with SQLFLOW_TURBOSTATS_KEY.
+  # Empty, the default, reports nowhere. The values are quoted so an unset
+  # variable renders as an empty string, which the serve schema reads as
+  # off, and not as null, which it rejects. Needs SQLFlow v2026.09.21 or later.
+  turbostats:
+    id: "{{ SQLFLOW_TURBOSTATS_ID|default('sqlflow-bluesky-api') }}"
+    report_to: "{{ SQLFLOW_TURBOSTATS_REPORT_TO|default('') }}"
+    key: "{{ SQLFLOW_TURBOSTATS_KEY|default('') }}"
 
   http:
     addr: "0.0.0.0:{{ SQLFLOW_SERVE_PORT|default('8080') }}"
