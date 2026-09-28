@@ -1,5 +1,6 @@
-# Render Blueprint: a Postgres, a background worker streaming Jetstream into
-# it, and a web service serving the rollups over HTTP from the worker's image.
+# Render Blueprint: a Postgres, a private service streaming Jetstream into it,
+# a web service serving the rollups over HTTP from the same image, and a second
+# private service checking that those rollups match what they are built from.
 #
 # Everything the demo needs is declared here, so the Deploy to Render button in
 # the README works in a workspace that has none of it. fromDatabase may
@@ -25,10 +26,25 @@ databases:
     storageAutoscalingEnabled: false
 
 services:
-  - type: worker
-    name: sqlflow-bluesky
+  # A private service rather than a worker, and named for the repository,
+  # because that is what is running: these services were created by hand before
+  # this file existed, and a Blueprint matches by name and type. Declared as a
+  # worker under the old name, a sync creates a second pipeline beside the live
+  # one -- both consuming Jetstream, both upserting the same minute -- rather
+  # than adopting it.
+  #
+  # pserv is also the better of the two. A worker cannot open a port, and the
+  # engine's /metrics is the only place messages_unplaceable_total is readable.
+  # A release that refused 82% of posts passed every config check the repository
+  # had; the counter that would have named it in a second is on :8000.
+  - type: pserv
+    name: sql-flow-bluesky-demo
     runtime: docker
     dockerfilePath: ./Dockerfile
+    # The entrypoint passes its arguments through to sqlflow run. Without
+    # --metrics nothing listens, and a private service with no open port is a
+    # service Render has no address for.
+    dockerCommand: /app/bin/entrypoint.sh --metrics prometheus
     # 55 MiB resident at steady state, measured locally at ~44 messages/sec.
     plan: 0.5c-512mb
     # The database's region. connectionString is the private-network URL,
@@ -108,11 +124,14 @@ services:
   # and CREATE OR REPLACE, so it cannot drop or empty a table that holds
   # history. A table whose columns disagree aborts the whole transaction and
   # exits non-zero rather than changing anything.
-  - type: worker
+  # pserv, like the pipeline: bin/rollups.sh already serves /healthz and
+  # rollup_drift_buckets on :8000, and reporting drift to nowhere is the one
+  # thing this service must not do.
+  - type: pserv
     name: sqlflow-bluesky-rollups
     runtime: docker
     dockerfilePath: ./Dockerfile
-    # Overrides the worker entrypoint, which would start a second pipeline.
+    # Overrides the image's entrypoint, which would start a second pipeline.
     # bin/rollups.sh applies the migrations first: `rollup install` exits
     # non-zero when the minute table is not there yet, and nothing orders one
     # service ahead of another on a first deploy.
