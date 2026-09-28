@@ -8,9 +8,9 @@ pipeline's uptime and streaming progress.
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/turbolytics/sql-flow-bluesky-demo)
 
-One click creates the Postgres, the worker and the API, and asks you for no
-secrets. It is a paid deploy — Render quoted $21.50 a month — and it pins a
-region: see [Deploy to Render](#deploy-to-render) for what it creates.
+One click creates the Postgres, the worker, the API and the rollup checker, and
+asks you for no secrets. It is a paid deploy and it pins a region: see
+[Deploy to Render](#deploy-to-render) for what it creates and what it costs.
 
 ## Why this exists
 
@@ -109,6 +109,27 @@ the measures, and the dataset the API serves. `migrations/0005_rollups.sql`
 and `serve.yml`'s `posts_by_lang` dataset are generated from it with
 `sqlflow rollup`, and `make validate` fails when either has drifted. Change
 the declaration, run `make rollups`, and commit what it writes.
+
+A third service checks them. `sqlflow-bluesky-rollups` runs `sqlflow rollup
+run`, which does not do the merge — the triggers above do, and they keep doing
+it whether that service is running or not. What it adds is everything around
+the merge: it fills in history a table is missing, recomputes every bucket
+against the table below it on a loop, and reports what differs as
+`rollup_drift_buckets`. Losing it is not an outage. The numbers stay right and
+only the checking stops.
+
+It can be started against a database that has been running without it. `rollup
+install` compares each table's columns with what `rollups.yml` declares and
+records the declaration in `sqlflow_rollup_state`; it issues only `CREATE IF
+NOT EXISTS` and `CREATE OR REPLACE`, so it cannot drop or empty a table that
+holds history, and a table whose columns disagree aborts the whole transaction
+rather than changing anything. Locally it is off by default:
+
+```sh
+docker compose up -d rollups
+curl -s localhost:8001/healthz        # backfilling, healthy or standby
+curl -s localhost:8001/metrics | grep rollup_drift_buckets
+```
 
 A minute with no rows is a minute the pipeline was not running. This query
 lists them:
@@ -336,17 +357,25 @@ Postgres already on 5432. Set `POSTGRES_HOST_PORT` to change it.
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/turbolytics/sql-flow-bluesky-demo)
 
-[`render.yaml`](render.yaml) is a Render Blueprint declaring all three
-resources: the Postgres, the `sqlflow-bluesky` worker, and the
-`sqlflow-bluesky-api` web service. Both build the same
-[`Dockerfile`](Dockerfile); the API runs `bin/serve.sh` instead of the worker's
-entrypoint. You enter no secrets — Render sets `SQLFLOW_POSTGRES_URI` from the
-database it creates and mints the API's client id. Only the API is public.
+[`render.yaml`](render.yaml) is a Render Blueprint declaring all four
+resources: the Postgres, the `sqlflow-bluesky` worker, the
+`sqlflow-bluesky-api` web service, and the `sqlflow-bluesky-rollups` checker.
+All three services build the same [`Dockerfile`](Dockerfile) and override the
+worker's entrypoint: the API runs `bin/serve.sh`, the checker runs
+`sqlflow rollup run`. You enter no secrets — Render sets
+`SQLFLOW_POSTGRES_URI` from the database it creates and mints the API's client
+id. Only the API is public.
 
-**It is not free.** Render quoted $21.50 a month in September 2026: a
-`0.1c-256mb` database and two `0.5c-512mb` services, and there is no free plan
-for background workers. Render totals the cost on the confirmation screen
-before it creates anything.
+**It is not free.** Render quoted $21.50 a month in September 2026 for a
+`0.1c-256mb` database and two `0.5c-512mb` services; the checker is a third
+service on the same plan. There is no free plan for background workers, and
+`0.5c-512mb` is the smallest a service can be. Render totals the cost on the
+confirmation screen before it creates anything — read it rather than trusting
+the figure above.
+
+The checker is the one resource you can decline. Delete that service from
+`render.yaml` and the rollups are still correct, because the triggers maintain
+them; you lose the drift check and the backfill.
 
 ### Check it worked
 

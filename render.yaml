@@ -93,3 +93,45 @@ services:
         value: "8080"
       - key: SQLFLOW_LOG_LEVEL
         value: INFO
+
+  # The rollup supervisor. It does not maintain the rollups: the triggers
+  # migrations/0005_rollups.sql installs do that, in the writing transaction,
+  # and they keep doing it whether this service runs or not. What it adds is
+  # everything around the merge -- it backfills history a table is missing,
+  # recomputes every bucket against the table below it on a loop, and reports
+  # what differs. So losing it is not an incident: the numbers stay right and
+  # only the checking stops.
+  #
+  # It adopts what the migrations already built. `rollup install` compares each
+  # table's columns against what rollups.yml declares and records the
+  # declaration in sqlflow_rollup_state; it issues only CREATE IF NOT EXISTS
+  # and CREATE OR REPLACE, so it cannot drop or empty a table that holds
+  # history. A table whose columns disagree aborts the whole transaction and
+  # exits non-zero rather than changing anything.
+  - type: worker
+    name: sqlflow-bluesky-rollups
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    # Overrides the worker entrypoint, which would start a second pipeline.
+    # bin/rollups.sh applies the migrations first: `rollup install` exits
+    # non-zero when the minute table is not there yet, and nothing orders one
+    # service ahead of another on a first deploy.
+    dockerCommand: /app/bin/rollups.sh
+    # 22 MiB resident measured locally, idle at 0% CPU between passes: the
+    # backfill is chunked and a verify pass reads a few buckets. Far more than
+    # this needs, and also the smallest plan there is -- Render's schema offers
+    # nothing below 0.5c-512mb for a service.
+    plan: 0.5c-512mb
+    # The database's region, for the private connection string.
+    region: virginia
+    # As on the services above.
+    autoDeployTrigger: "off"
+    envVars:
+      # rollups.yml templates store.postgres.dsn from this. Two connections,
+      # leader or standby: one holds the leader lock, one does the work.
+      - key: SQLFLOW_POSTGRES_URI
+        fromDatabase:
+          name: sqlflow-demo-rollups
+          property: connectionString
+      - key: SQLFLOW_LOG_LEVEL
+        value: INFO

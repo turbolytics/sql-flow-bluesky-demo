@@ -6,6 +6,19 @@
 #
 # CI runs `sqlflow rollup check`, which fails when either generated file
 # differs from what this file generates.
+
+# Where the rollup tables live. `rollup install`, `rollup run` and `rollup
+# verify` read this; `ddl`, `serve` and `check` never connect and ignore it, so
+# CI validates this file with the variable unset and gets a warning rather than
+# a failure, as it already does for serve.yml.
+#
+# The same variable the worker and the API read. Only SQLFLOW_-prefixed
+# variables reach a config template.
+store:
+  type: postgres
+  postgres:
+    dsn: "{{ SQLFLOW_POSTGRES_URI }}"
+
 rollups:
   - name: posts
     source:
