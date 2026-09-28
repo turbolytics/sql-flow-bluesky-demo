@@ -13,5 +13,5 @@ fi
 
 # exec keeps sqlflow as PID 1, so the supervisor's SIGTERM reaches it and the
 # graceful drain runs: stop consuming, write the buffered batch, final window
-# poll, commit, exit 0. Without exec, bash holds PID 1 and forwards nothing.
+# pass, commit, exit 0. Without exec, bash holds PID 1 and forwards nothing.
 exec sqlflow run -c /app/pipeline.yml "$@"

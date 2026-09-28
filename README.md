@@ -38,8 +38,10 @@ than about moving rows, and it keeps writes low: about 33 rows per minute.
    DuckDB.
 
 `pipeline.yml` declares the window: the time column, the bucket size, the
-grace, the idle bound, and what happens to a late row. sqlflow keeps the
-watermark and generates the SQL that collects and deletes closed minutes.
+grace, the idle bound, and how long a closed minute still accepts posts.
+sqlflow keeps the watermark, tells the window to publish in the commit after
+the watermark moves, and generates the SQL that collects and deletes closed
+minutes. Nothing polls.
 
 The window writes through sqlflow's `postgres` sink. The sink holds its own
 connection to Postgres and upserts each closed minute on `(bucket, lang)` in
@@ -287,13 +289,16 @@ The worker applies the migrations, then starts streaming:
 applied  0001_posts_per_minute_by_lang
 applied  0002_pipeline_status_view
 ... Executing command step {"name": "declare the post schema"}
-... starting watermark manager {"table": "posts_per_minute_by_lang", "poll_interval": "10s"}
+... starting watermark manager {"table": "posts_per_minute_by_lang"}
 ... throughput {"messages_consumed": 199, "total_throughput_per_second": 40.9}
 ```
 
-Each minute reaches Postgres about 70 seconds after it ends: 60 seconds of
-grace, plus up to one 10-second poll. The first minute is partial, because the worker
-started partway through it.
+Each minute reaches Postgres about 60 seconds after it ends. That is the
+grace: the minute closes once a post arrives stamped a minute past its end,
+and the publish follows in that batch's own commit rather than waiting for a
+timer. At this rate a batch of 500 lands every ten seconds or so, which is the
+only slack left. The first minute is partial, because the worker started
+partway through it.
 
 In a second terminal, open a Postgres shell and query:
 
@@ -412,19 +417,30 @@ Without either required variable, the API exits with code 2.
 sqlflow writes a closed minute to Postgres before deleting it from DuckDB. The
 same minute can be written twice: the sink retries a write that timed out,
 which may already have landed, and a close whose delete conflicts with the
-pipeline rolls back and publishes the minute again on the next poll. The upsert
+pipeline rolls back and publishes the minute again on the next pass. The upsert
 on `(bucket, lang)` absorbs the duplicate, so counts stay correct.
 
-### A late post is dropped
+### A late post corrects its minute, for five minutes
 
-A post for a minute that already closed is late. sqlflow discards it and logs
-`dropped late rows` with the count. The published minute keeps the count it
-closed with.
+A post for a minute that already closed is late, and sqlflow decides that when
+the post arrives rather than afterwards. `allowed_lateness_seconds: 300` keeps
+a closed minute's rows in DuckDB for five more minutes, so a late post inside
+that window is written and the minute is republished as a **whole value**:
+`emit_sql` over every row the minute still has. The upsert replaces the
+minute's count with the corrected one, and because each rollup grain is
+recomputed from the grain below and written with `DO UPDATE`, the correction
+reaches every grain up to the day. `window_recomputes_total` counts the
+republications.
 
-The pipeline declares `late_rows: drop` on purpose. The alternative, `reemit`,
-publishes the late posts as the minute's rows, and the upsert replaces the
-minute's count with theirs. In a local run, one late post turned a published
-count of 5 into 1.
+Past those five minutes the post is refused before it reaches DuckDB, logged
+once per batch, and counted in `window_late_rows_total{outcome="refused"}`.
+That count is the demo's data-loss number; the recomputed one is not.
+
+This replaces `late_rows`, which had no setting that was right. `drop`
+discarded the post after the fact. `reemit` published the late posts alone, as
+a delta, and the upsert replaced the minute's count with theirs: in a local
+run, one late post turned a published count of 5 into 1. A whole value cannot
+do that.
 
 ### A restart loses data
 

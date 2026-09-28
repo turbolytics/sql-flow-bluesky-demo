@@ -12,6 +12,11 @@ commands:
     sql: |
       CREATE TABLE IF NOT EXISTS posts (
         time_us BIGINT,
+        -- The post's own time, as the source assigned it from time_us. The
+        -- engine fills this column, the handler cuts the minute from it, and
+        -- the engine decides each post's lateness against that same minute.
+        -- A windowing pipeline on a structured handler must declare it.
+        event_time TIMESTAMPTZ,
         commit STRUCT(
           operation TEXT,
           record STRUCT(langs TEXT[])
@@ -27,6 +32,11 @@ tables:
       # plan. Without it, each batch appends its own counts and emit_sql sums
       # them per minute. Measured flat over eight hours.
       # See turbolytics/sql-flow#268.
+      #
+      # allowed_lateness_seconds below holds a closed minute's rows five
+      # minutes longer than the close, so the table carries about six minutes
+      # of them rather than one. At this cardinality that is a few thousand
+      # rows, and none of them is indexed.
       sql: |
         CREATE TABLE IF NOT EXISTS posts_per_minute_by_lang (
           bucket TIMESTAMPTZ,
@@ -37,30 +47,34 @@ tables:
       # sqlflow closes each minute against an event-time watermark: the newest
       # minute the data has reached, less the grace. A minute closes once the
       # stream has moved grace_seconds past its end, so the result is the same
-      # whether the data arrives live or as a replay. The one wall-clock rule
-      # is the idle bound: after idle_close_seconds with no batch arriving,
-      # every open minute closes, so a quiet stream still publishes its last
-      # minute.
+      # whether the data arrives live or as a replay. Nothing polls: the engine
+      # tells the window to publish in the commit after the watermark moves.
+      # The one wall-clock rule is the idle bound: after idle_close_seconds
+      # with no batch arriving, every open minute closes, so a quiet stream
+      # still publishes its last minute.
       #
       # The grace outlives the batch wait on purpose. A batch is written when
       # it fills or after flush_interval_seconds, so an event from the last
       # seconds of a minute can reach DuckDB up to that long after the minute
       # ended.
       #
-      # late_rows is drop, not reemit. A late row belongs to a minute that
-      # already closed, and that minute's other rows are already deleted from
-      # DuckDB. reemit publishes only the late rows, and the upsert below
-      # replaces the minute's count with theirs: in a local run, one late post
-      # turned a published count of 5 into 1. drop discards the row, logs
-      # "dropped late rows", and counts it in window_late_rows_total.
-      # sqlflow validate refuses reemit with an upserting postgres sink.
+      # allowed_lateness_seconds keeps a closed minute's rows for five more
+      # minutes. A post that arrives for one of them in that time is written,
+      # and the minute is republished as a whole value -- emit_sql over every
+      # row it still has -- so the upsert below replaces the minute with the
+      # exact count rather than a correction the reader has to add. The
+      # rollup triggers replace by key too, so the correction reaches every
+      # grain up to the day. Past those five minutes a late post is refused
+      # before it reaches DuckDB and counted in
+      # window_late_rows_total{outcome="refused"}; set this to 0 to refuse
+      # every late post, which is what the removed late_rows: drop did after
+      # the fact.
       window:
         time_column: bucket
         size_seconds: 60
         grace_seconds: 60
         idle_close_seconds: 60
-        late_rows: drop
-        poll_interval_seconds: 10
+        allowed_lateness_seconds: 300
         # One row per minute and language. The table holds one row per batch,
         # so a minute's count is the sum of them. The sink keeps only the last
         # row it is handed for a key, so an unsummed minute would publish one
@@ -122,6 +136,14 @@ pipeline:
     type: websocket
     websocket:
       uri: "{{ SQLFLOW_JETSTREAM_URI|default('wss://jetstream2.us-east.bsky.network/subscribe?wantedCollections=app.bsky.feed.post') }}"
+      # time_us is microseconds since the epoch. The engine reads it here,
+      # once, and every later decision -- which minute a post belongs to,
+      # whether it is late -- is made from that one reading. A post stamped
+      # ahead of the engine's own clock is refused rather than closing every
+      # minute up to its date.
+      event_time:
+        path: time_us
+        format: unix_us
 
   handler:
     type: handlers.StructuredBatch
@@ -129,11 +151,12 @@ pipeline:
     sql: |
       INSERT INTO posts_per_minute_by_lang
       SELECT
-        -- to_timestamp yields TIMESTAMPTZ, so the bucket is an instant and the
-        -- write into a Postgres TIMESTAMPTZ column needs no interpretation. The
-        -- example's date_trunc(make_timestamp(time_us)) yields a naive
-        -- TIMESTAMP, and Postgres reads a naive value in the session timezone.
-        time_bucket(INTERVAL '1 minute', to_timestamp(time_us / 1000000)) AS bucket,
+        -- event_time is TIMESTAMPTZ, so the bucket is an instant and the write
+        -- into a Postgres TIMESTAMPTZ column needs no interpretation. It must
+        -- be time_bucket over event_time with the window's own size: the
+        -- engine decides a post's lateness from that bucket, and sqlflow
+        -- validate refuses any other expression.
+        time_bucket(INTERVAL '1 minute', event_time) AS bucket,
         coalesce(commit.record.langs[1], 'unknown') AS lang,
         count(*) AS posts
       FROM posts
