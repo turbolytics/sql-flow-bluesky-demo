@@ -2,7 +2,7 @@
 
 A [sqlflow](https://github.com/turbolytics/sql-flow) pipeline that reads the
 public Bluesky firehose, counts posts per minute by language, and writes each
-minute to Postgres. It runs continuously as one background worker on Render.
+minute to Postgres. It runs continuously as a private service on Render.
 The rows it writes are the data behind a public demo page that shows the
 pipeline's uptime and streaming progress.
 
@@ -31,9 +31,10 @@ than about moving rows, and it keeps writes low: about 33 rows per minute.
    runs inside the process.
 3. The handler's SQL groups the batch by minute and first language and adds
    the counts to an in-memory DuckDB table.
-4. Every 10 seconds, sqlflow checks the table's window for closed minutes. A
+4. After each commit, sqlflow asks the window what the new watermark closed. A
    minute closes once the stream's event time is 60 seconds past the minute's
-   end, or once no data has arrived for a minute.
+   end, or once no data has arrived for a minute. No timer decides this: a
+   minute publishes in the commit that moves the watermark past it.
 5. sqlflow upserts closed minutes into Postgres, then deletes them from
    DuckDB.
 
@@ -55,7 +56,9 @@ There is no state file.
 
 ## What gets stored
 
-One table and four views.
+Eleven tables and four views. The minute table below, the ten rollup tables
+further down, `pipeline_status`, and the three `posts_per_*_by_lang` views that
+predate the rollup tables and aggregate on read.
 
 `posts_per_minute_by_lang` holds one row per minute per language:
 
@@ -358,20 +361,25 @@ Postgres already on 5432. Set `POSTGRES_HOST_PORT` to change it.
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/turbolytics/sql-flow-bluesky-demo)
 
 [`render.yaml`](render.yaml) is a Render Blueprint declaring all four
-resources: the Postgres, the `sqlflow-bluesky` worker, the
+resources: the Postgres, the `sql-flow-bluesky-demo` pipeline, the
 `sqlflow-bluesky-api` web service, and the `sqlflow-bluesky-rollups` checker.
-All three services build the same [`Dockerfile`](Dockerfile) and override the
-worker's entrypoint: the API runs `bin/serve.sh`, the checker runs
-`sqlflow rollup run`. You enter no secrets — Render sets
-`SQLFLOW_POSTGRES_URI` from the database it creates and mints the API's client
-id. Only the API is public.
+All three services build the same [`Dockerfile`](Dockerfile); the API and the
+checker override its entrypoint with `bin/serve.sh` and `bin/rollups.sh`. You
+enter no secrets — Render sets `SQLFLOW_POSTGRES_URI` from the database it
+creates and mints the API's client id. Only the API is public.
+
+The pipeline and the checker are private services rather than background
+workers. A worker cannot open a port, and both serve `/metrics` and `/healthz`
+on `:8000` — `messages_unplaceable_total` and `rollup_drift_buckets` are the
+two numbers that say whether this demo is losing data, and neither is readable
+from a worker.
 
 **It is not free.** Render quoted $21.50 a month in September 2026 for a
 `0.1c-256mb` database and two `0.5c-512mb` services; the checker is a third
-service on the same plan. There is no free plan for background workers, and
-`0.5c-512mb` is the smallest a service can be. Render totals the cost on the
-confirmation screen before it creates anything — read it rather than trusting
-the figure above.
+service on the same plan. There is no free plan for either kind of service,
+and `0.5c-512mb` is the smallest a service can be. Render totals the cost on
+the confirmation screen before it creates anything — read it rather than
+trusting the figure above.
 
 The checker is the one resource you can decline. Delete that service from
 `render.yaml` and the rollups are still correct, because the triggers maintain
