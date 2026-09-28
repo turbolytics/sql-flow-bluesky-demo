@@ -19,6 +19,17 @@ store:
   postgres:
     dsn: "{{ SQLFLOW_POSTGRES_URI }}"
 
+# Reports `rollup run` to a control plane when SQLFLOW_TURBOSTATS_REPORT_TO is
+# set, signed with SQLFLOW_TURBOSTATS_KEY. Empty, the default, reports nowhere.
+# The values are quoted so an unset variable renders as an empty string, which
+# reads as off. A file that reports declares at most 10 tables, and this one
+# declares exactly 10: two dimension sets at five grains. Needs SQLFlow
+# v2026.09.27 or later.
+turbostats:
+  id: "{{ SQLFLOW_TURBOSTATS_ID|default('sqlflow-bluesky-rollups') }}"
+  report_to: "{{ SQLFLOW_TURBOSTATS_REPORT_TO|default('') }}"
+  key: "{{ SQLFLOW_TURBOSTATS_KEY|default('') }}"
+
 rollups:
   - name: posts
     source:
