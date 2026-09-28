@@ -17,6 +17,9 @@ WORKDIR /app
 
 COPY pipeline.yml /app/pipeline.yml
 COPY serve.yml /app/serve.yml
+# The rollup daemon's config. The worker and the API never read it; the
+# sqlflow-bluesky-rollups service in render.yaml runs `rollup run` against it.
+COPY rollups.yml /app/rollups.yml
 COPY migrations /app/migrations
 COPY bin /app/bin
 

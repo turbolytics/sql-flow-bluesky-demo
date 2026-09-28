@@ -50,3 +50,32 @@ services:
       SQLFLOW_LOG_LEVEL: INFO
     ports:
       - "127.0.0.1:${API_HOST_PORT:-8080}:8080"
+
+  # The rollup supervisor, as render.yaml runs it. Not started by a bare
+  # `docker compose up`, because the triggers keep every grain current without
+  # it and the demo reads the same numbers either way:
+  #
+  #   docker compose up -d rollups        start it
+  #   curl localhost:8001/healthz         backfilling, healthy or standby
+  #   curl localhost:8001/metrics         rollup_drift_buckets is the one to read
+  #
+  # It adopts the tables the migrations built, so it can be started against a
+  # database that has been running without it.
+  rollups:
+    profiles: [rollups]
+    build:
+      context: .
+      args:
+        SQLFLOW_IMAGE: ${SQLFLOW_IMAGE:-turbolytics/sql-flow:v2026.09.27.1}
+    # Overrides the worker entrypoint, which would start a second pipeline.
+    # Applies the migrations first, as the API's entrypoint does: the daemon
+    # exits rather than waiting when the minute table is not there yet.
+    entrypoint: /app/bin/rollups.sh
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SQLFLOW_POSTGRES_URI: postgresql://bluesky:bluesky@postgres:5432/bluesky
+      SQLFLOW_LOG_LEVEL: INFO
+    ports:
+      - "127.0.0.1:${ROLLUPS_HOST_PORT:-8001}:8000"

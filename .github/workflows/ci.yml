@@ -367,6 +367,37 @@ jobs:
           code=$(curl -s -o body.json -w '%{http_code}' -H "Authorization: Bearer $CLIENT_ID" localhost:8080/v1/datasets/pipeline_status)
           [ "$code" = 200 ] || fail "bearer header: $code $(cat body.json)"
 
+      # The rollup daemon takes over the tables migrations/0005_rollups.sql
+      # built, in a database that already holds rows. That is how it reaches
+      # production, and the failure it has to not have is emptying a table it
+      # adopts. Runs last, so the assertions above see the schema the
+      # migrations made rather than the one install replaced.
+      - name: The rollup daemon adopts the migrations' tables
+        run: |
+          fail() { echo "$1" >&2; exit 1; }
+          # --entrypoint: the image's own entrypoint migrates and then starts a
+          # pipeline, and would read these as arguments to that.
+          sf() { docker run --rm --network host -e SQLFLOW_POSTGRES_URI \
+            --entrypoint sqlflow sqlflow-bluesky-demo "$@"; }
+          rows() { psql "$SQLFLOW_POSTGRES_URI" -Atc "$1"; }
+
+          before=$(rows "SELECT sum(posts) FROM posts_by_lang_1d")
+          [ "$before" = 15 ] || fail "expected 15 posts before install, got $before"
+
+          # Adopts rather than creates: exits 0, says so, and leaves the rows.
+          sf rollup install -c /app/rollups.yml | tee install.log
+          grep -q "adopted the tables a migration created" install.log \
+            || fail "install did not adopt: $(cat install.log)"
+
+          after=$(rows "SELECT sum(posts) FROM posts_by_lang_1d")
+          [ "$after" = "$before" ] || fail "install changed stored rows: $before -> $after"
+
+          state=$(rows "SELECT count(*) FROM sqlflow_rollup_state WHERE rollup = 'posts'")
+          [ "$state" = 1 ] || fail "install recorded no state row"
+
+          # Read-only, exits non-zero with system.rollup.drift on a mismatch.
+          sf rollup verify -c /app/rollups.yml
+
       - name: API logs
         if: always()
         run: docker logs api || true
