@@ -26,19 +26,20 @@ databases:
     storageAutoscalingEnabled: false
 
 services:
-  # A private service rather than a worker, and named for the repository,
-  # because that is what is running: these services were created by hand before
-  # this file existed, and a Blueprint matches by name and type. Declared as a
-  # worker under the old name, a sync creates a second pipeline beside the live
-  # one -- both consuming Jetstream, both upserting the same minute -- rather
-  # than adopting it.
+  # A Blueprint matches an existing resource by name and type, and these
+  # services were created by hand before this file existed. Where the two
+  # disagreed, Render offered to create a second pipeline beside the live one --
+  # both consuming Jetstream, both upserting the same minute -- rather than
+  # adopting it. The live service was renamed to the name below; -pipeline,
+  # -api and -rollups now say what each one does.
   #
-  # pserv is also the better of the two. A worker cannot open a port, and the
-  # engine's /metrics is the only place messages_unplaceable_total is readable.
-  # A release that refused 82% of posts passed every config check the repository
-  # had; the counter that would have named it in a second is on :8000.
+  # pserv rather than worker, and not only to match. A worker cannot open a
+  # port, and the engine's /metrics is the only place
+  # messages_unplaceable_total is readable. A release that refused 82% of posts
+  # passed every config check this repository had; the counter that would have
+  # named it in a second is on :8000.
   - type: pserv
-    name: sql-flow-bluesky-demo
+    name: sqlflow-bluesky-pipeline
     runtime: docker
     dockerfilePath: ./Dockerfile
     # The entrypoint passes its arguments through to sqlflow run. Without

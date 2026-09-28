@@ -361,7 +361,7 @@ Postgres already on 5432. Set `POSTGRES_HOST_PORT` to change it.
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/turbolytics/sql-flow-bluesky-demo)
 
 [`render.yaml`](render.yaml) is a Render Blueprint declaring all four
-resources: the Postgres, the `sql-flow-bluesky-demo` pipeline, the
+resources: the Postgres, the `sqlflow-bluesky-pipeline` service, the
 `sqlflow-bluesky-api` web service, and the `sqlflow-bluesky-rollups` checker.
 All three services build the same [`Dockerfile`](Dockerfile); the API and the
 checker override its entrypoint with `bin/serve.sh` and `bin/rollups.sh`. You
