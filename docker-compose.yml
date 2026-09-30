@@ -22,7 +22,7 @@ services:
     build:
       context: .
       args:
-        SQLFLOW_IMAGE: ${SQLFLOW_IMAGE:-turbolytics/sql-flow:v2026.09.27.1}
+        SQLFLOW_IMAGE: ${SQLFLOW_IMAGE:-turbolytics/sql-flow:v2026.09.30.1}
     # The healthcheck gate is what lets the entrypoint migrate on start without
     # a retry loop.
     depends_on:
@@ -39,7 +39,7 @@ services:
     build:
       context: .
       args:
-        SQLFLOW_IMAGE: ${SQLFLOW_IMAGE:-turbolytics/sql-flow:v2026.09.27.1}
+        SQLFLOW_IMAGE: ${SQLFLOW_IMAGE:-turbolytics/sql-flow:v2026.09.30.1}
     entrypoint: /app/bin/serve.sh
     depends_on:
       postgres:
@@ -66,7 +66,7 @@ services:
     build:
       context: .
       args:
-        SQLFLOW_IMAGE: ${SQLFLOW_IMAGE:-turbolytics/sql-flow:v2026.09.27.1}
+        SQLFLOW_IMAGE: ${SQLFLOW_IMAGE:-turbolytics/sql-flow:v2026.09.30.1}
     # Overrides the worker entrypoint, which would start a second pipeline.
     # Applies the migrations first, as the API's entrypoint does: the daemon
     # exits rather than waiting when the minute table is not there yet.
