@@ -360,13 +360,18 @@ Postgres already on 5432. Set `POSTGRES_HOST_PORT` to change it.
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/turbolytics/sql-flow-bluesky-demo)
 
-[`render.yaml`](render.yaml) is a Render Blueprint declaring all four
+[`render.yaml`](render.yaml) is a Render Blueprint declaring all five
 resources: the Postgres, the `sqlflow-bluesky-pipeline` service, the
-`sqlflow-bluesky-api` web service, and the `sqlflow-bluesky-rollups` checker.
-All three services build the same [`Dockerfile`](Dockerfile); the API and the
-checker override its entrypoint with `bin/serve.sh` and `bin/rollups.sh`. You
-enter no secrets — Render sets `SQLFLOW_POSTGRES_URI` from the database it
-creates and mints the API's client id. Only the API is public.
+`sqlflow-bluesky-api` web service, the `sqlflow-bluesky-rollups` checker, and
+`sqlflow-bluesky-dbhealth`, which watches the database for
+[control](https://control.turbolytics.io). The first three build the same
+[`Dockerfile`](Dockerfile); the API and the checker override its entrypoint
+with `bin/serve.sh` and `bin/rollups.sh`. dbhealth is a prebuilt image,
+[`turbolytics/dbhealth`](https://hub.docker.com/r/turbolytics/dbhealth),
+pinned by tag. Render sets the database URL for every service from the
+database it creates and mints the API's client id. The one thing it asks you
+for is dbhealth's control credential, `DBHEALTH_KEY`; leave it blank and
+dbhealth serves its numbers on `/metrics` alone. Only the API is public.
 
 The pipeline and the checker are private services rather than background
 workers. A worker cannot open a port, and both serve `/metrics` and `/healthz`
@@ -375,15 +380,17 @@ two numbers that say whether this demo is losing data, and neither is readable
 from a worker.
 
 **It is not free.** Render quoted $21.50 a month in September 2026 for a
-`0.1c-256mb` database and two `0.5c-512mb` services; the checker is a third
-service on the same plan. There is no free plan for either kind of service,
+`0.1c-256mb` database and two `0.5c-512mb` services; the checker and dbhealth
+are a third and a fourth on the same plan. There is no free plan for either kind of service,
 and `0.5c-512mb` is the smallest a service can be. Render totals the cost on
 the confirmation screen before it creates anything — read it rather than
 trusting the figure above.
 
-The checker is the one resource you can decline. Delete that service from
-`render.yaml` and the rollups are still correct, because the triggers maintain
-them; you lose the drift check and the backfill.
+The checker and dbhealth are the two resources you can decline. Delete the
+checker from `render.yaml` and the rollups are still correct, because the
+triggers maintain them; you lose the drift check and the backfill. Delete
+dbhealth and nothing about the demo changes; you lose the database's own
+status in control.
 
 ### Check it worked
 
@@ -404,7 +411,10 @@ $ curl -sG --data-urlencode "client_id=<id>" \
  "row_count": 1}
 ```
 
-Real output from a deploy three minutes old. The client id is
+Real output from a deploy three minutes old. With a credential entered,
+[control](https://control.turbolytics.io) lists `sqlflow-demo-rollups` under
+Databases a minute after dbhealth starts: serving and how fast, connections
+in use, size, and how old the minute table's newest row is. The client id is
 `SQLFLOW_SERVE_TOKEN_BLUESKY_DEMO` on the API's Environment page; without it
 every route but `/healthz` and `/metrics` answers `401 unauthorized`. Expect no
 rows for the first couple of minutes — a minute reaches Postgres about 70
@@ -417,8 +427,12 @@ seconds after it ends, and the first one is partial.
 - The database is declared with the live demo's settings. A Blueprint entry
   whose name matches an existing resource adopts it and applies them, and
   storage cannot be decreased.
-- All three share a region: the services reach the database over its private
+- All four share a region: the services reach the database over its private
   network URL.
+- dbhealth reads `pg_stat_activity` as the database's own user. If control's
+  Collection panel names `pg_read_all_stats`, that user cannot see other
+  sessions, and the connection counts are its own; everything else is
+  unaffected.
 - Rotate the client id by editing the variable and redeploying. It keeps its
   old name because a renamed `generateValue` key mints a new value.
 
