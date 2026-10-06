@@ -1,6 +1,7 @@
 # Render Blueprint: a Postgres, a private service streaming Jetstream into it,
-# a web service serving the rollups over HTTP from the same image, and a second
-# private service checking that those rollups match what they are built from.
+# a web service serving the rollups over HTTP from the same image, a second
+# private service checking that those rollups match what they are built from,
+# and a third watching the database itself for control.
 #
 # Everything the demo needs is declared here, so the Deploy to Render button in
 # the README works in a workspace that has none of it. fromDatabase may
@@ -155,3 +156,44 @@ services:
           property: connectionString
       - key: SQLFLOW_LOG_LEVEL
         value: INFO
+
+  # dbhealth, watching the database for control. The engine reports its own
+  # state over TurboStats; nothing reported the database's -- whether it
+  # answers and how fast, how many of its connections are in use, how big it
+  # is, how old the minute table's newest row is. dbhealth reads those once a
+  # minute over the same private-network URL as the services above and
+  # reports them to https://ingest.turbolytics.io, where control shows the
+  # database beside the pipeline writing to it.
+  #
+  # A prebuilt image, pinned by tag: this repository builds nothing for it,
+  # and nothing redeploys it until the tag here moves. pserv, as above:
+  # dbhealth serves /metrics and /healthz on :8000.
+  - type: pserv
+    name: sqlflow-bluesky-dbhealth
+    runtime: image
+    image:
+      url: docker.io/turbolytics/dbhealth:v0.1.0
+    # 20 MiB resident: one SELECT 1 and six catalog reads a minute. The
+    # smallest plan there is.
+    plan: 0.5c-512mb
+    # The database's region, for the private connection string.
+    region: virginia
+    envVars:
+      # The private connection string. dbhealth keeps it in the process;
+      # what it reports is host:port/database.
+      - key: DBHEALTH_DSN
+        fromDatabase:
+          name: sqlflow-demo-rollups
+          property: connectionString
+      # Your org's credential from https://control.turbolytics.io. sync:
+      # false: Render asks for it in the dashboard when the Blueprint is
+      # applied and never writes it back here. With no credential dbhealth
+      # reports to :8000 alone.
+      - key: DBHEALTH_KEY
+        sync: false
+      # What control calls it: the database's name here, not the name
+      # Render gave the database inside Postgres.
+      - key: DBHEALTH_NAME
+        value: sqlflow-demo-rollups
+      - key: DBHEALTH_METRICS
+        value: prometheus
