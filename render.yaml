@@ -165,14 +165,19 @@ services:
   # reports them to https://ingest.turbolytics.io, where control shows the
   # database beside the pipeline writing to it.
   #
-  # A prebuilt image, pinned by tag: this repository builds nothing for it,
-  # and nothing redeploys it until the tag here moves. pserv, as above:
-  # dbhealth serves /metrics and /healthz on :8000.
+  # The published image, pinned by tag in dbhealth/Dockerfile, with the
+  # demo's config: the tables it watches are named there, each with its
+  # freshness column, since the rollups keep their time in `bucket`. A
+  # change outside dbhealth/ does not rebuild it. pserv, as above: dbhealth
+  # serves /metrics and /healthz on :8000.
   - type: pserv
     name: sqlflow-bluesky-dbhealth
-    runtime: image
-    image:
-      url: docker.io/turbolytics/dbhealth:v0.1.0
+    runtime: docker
+    dockerfilePath: ./dbhealth/Dockerfile
+    dockerContext: ./dbhealth
+    buildFilter:
+      paths:
+        - dbhealth/**
     # 20 MiB resident: one SELECT 1 and six catalog reads a minute. The
     # smallest plan there is.
     plan: 0.5c-512mb
@@ -187,13 +192,7 @@ services:
           property: connectionString
       # Your org's credential from https://control.turbolytics.io. sync:
       # false: Render asks for it in the dashboard when the Blueprint is
-      # applied and never writes it back here. With no credential dbhealth
-      # reports to :8000 alone.
+      # applied and never writes it back here. Required: the config reports
+      # to Control, and dbhealth refuses to start without it.
       - key: DBHEALTH_KEY
         sync: false
-      # What control calls it: the database's name here, not the name
-      # Render gave the database inside Postgres.
-      - key: DBHEALTH_NAME
-        value: sqlflow-demo-rollups
-      - key: DBHEALTH_METRICS
-        value: prometheus

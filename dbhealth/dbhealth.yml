@@ -1,0 +1,39 @@
+# dbhealth for the demo database. The tables are named, not discovered:
+# the rollups keep their time in `bucket`, which no default freshness
+# column matches, and discovery would also list sqlflow's temp staging
+# table. Named tables each get their newest row, and nothing else is
+# watched. Add a table here when a migration adds one.
+databases:
+  - kind: postgres
+    dsn: "{{ DBHEALTH_DSN }}"           # Render's private connection string
+    name: sqlflow-demo-rollups          # what Control calls it
+
+tables:
+  static:
+    - name: public.posts_per_minute_by_lang
+      freshness_column: bucket
+    - name: public.posts_by_lang_5m
+      freshness_column: bucket
+    - name: public.posts_by_lang_15m
+      freshness_column: bucket
+    - name: public.posts_by_lang_1h
+      freshness_column: bucket
+    - name: public.posts_by_lang_6h
+      freshness_column: bucket
+    - name: public.posts_by_lang_1d
+      freshness_column: bucket
+    - name: public.posts_total_5m
+      freshness_column: bucket
+    - name: public.posts_total_15m
+      freshness_column: bucket
+    - name: public.posts_total_1h
+      freshness_column: bucket
+    - name: public.posts_total_6h
+      freshness_column: bucket
+    - name: public.posts_total_1d
+      freshness_column: bucket
+
+report:
+  to: https://ingest.turbolytics.io
+  credential: "{{ DBHEALTH_KEY }}"
+  metrics: prometheus                   # /metrics and /healthz on :8000
