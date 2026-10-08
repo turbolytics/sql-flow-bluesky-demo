@@ -1,8 +1,12 @@
 # dbhealth for the demo database. The tables are named, not discovered:
-# the rollups keep their time in `bucket`, which no default freshness
-# column matches, and discovery would also list sqlflow's temp staging
-# table. Named tables each get their newest row, and nothing else is
-# watched. Add a table here when a migration adds one.
+# discovery would also list sqlflow's temp staging table, and naming the
+# freshness column says in one place which clock each table keeps (the
+# rollups keep theirs in `bucket`, which v0.2.0's defaults would find
+# first, and the minute table also carries `updated_at`, the write time,
+# which is not the question). Named tables each get their newest row,
+# and nothing else is watched. Add a table here when a migration adds
+# one. Since v0.2.0 every table also reports its schema's hash, the
+# columns that change, and its writes a second.
 databases:
   - kind: postgres
     dsn: "{{ DBHEALTH_DSN }}"           # Render's private connection string
