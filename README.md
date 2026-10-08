@@ -8,8 +8,8 @@ pipeline's uptime and streaming progress.
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/turbolytics/sql-flow-bluesky-demo)
 
-One click creates the Postgres, the worker, the API and the rollup checker, and
-asks you for no secrets. It is a paid deploy and it pins a region: see
+One click creates the Postgres, the worker, the API and dbhealth, and asks you
+for one credential. It is a paid deploy and it pins a region: see
 [Deploy to Render](#deploy-to-render) for what it creates and what it costs.
 
 ## Why this exists
@@ -113,13 +113,14 @@ and `serve.yml`'s `posts_by_lang` dataset are generated from it with
 `sqlflow rollup`, and `make validate` fails when either has drifted. Change
 the declaration, run `make rollups`, and commit what it writes.
 
-A third service checks them. `sqlflow-bluesky-rollups` runs `sqlflow rollup
-run`, which does not do the merge — the triggers above do, and they keep doing
-it whether that service is running or not. What it adds is everything around
-the merge: it fills in history a table is missing, recomputes every bucket
-against the table below it on a loop, and reports what differs as
-`rollup_drift_buckets`. Losing it is not an outage. The numbers stay right and
-only the checking stops.
+A checker exists, and the demo does not deploy it. `sqlflow rollup run` does
+not do the merge — the triggers above do, and they keep doing it whether it
+runs or not. What it adds is everything around the merge: it fills in history
+a table is missing, recomputes every bucket against the table below it on a
+loop, and reports what differs as `rollup_drift_buckets`. On Render that was a
+service, the cost of one, for a check that never differed; it was removed in
+October 2026. Run it against the live database when a new rollup table needs
+its history, then stop it.
 
 It can be started against a database that has been running without it. `rollup
 install` compares each table's columns with what `rollups.yml` declares and
@@ -360,37 +361,33 @@ Postgres already on 5432. Set `POSTGRES_HOST_PORT` to change it.
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/turbolytics/sql-flow-bluesky-demo)
 
-[`render.yaml`](render.yaml) is a Render Blueprint declaring all five
+[`render.yaml`](render.yaml) is a Render Blueprint declaring all four
 resources: the Postgres, the `sqlflow-bluesky-pipeline` service, the
-`sqlflow-bluesky-api` web service, the `sqlflow-bluesky-rollups` checker, and
-`sqlflow-bluesky-dbhealth`, which watches the database for
-[control](https://control.turbolytics.io). The first three build the same
-[`Dockerfile`](Dockerfile); the API and the checker override its entrypoint
-with `bin/serve.sh` and `bin/rollups.sh`. dbhealth is a prebuilt image,
+`sqlflow-bluesky-api` web service, and `sqlflow-bluesky-dbhealth`, which
+watches the database for [control](https://control.turbolytics.io). The first
+two build the same [`Dockerfile`](Dockerfile); the API overrides its
+entrypoint with `bin/serve.sh`. dbhealth is a prebuilt image,
 [`turbolytics/dbhealth`](https://hub.docker.com/r/turbolytics/dbhealth),
 pinned by tag. Render sets the database URL for every service from the
 database it creates and mints the API's client id. The one thing it asks you
 for is dbhealth's control credential, `DBHEALTH_KEY`; leave it blank and
 dbhealth serves its numbers on `/metrics` alone. Only the API is public.
 
-The pipeline and the checker are private services rather than background
-workers. A worker cannot open a port, and both serve `/metrics` and `/healthz`
-on `:8000` — `messages_unplaceable_total` and `rollup_drift_buckets` are the
-two numbers that say whether this demo is losing data, and neither is readable
-from a worker.
+The pipeline is a private service rather than a background worker. A worker
+cannot open a port, and the pipeline serves `/metrics` and `/healthz` on
+`:8000` — `messages_unplaceable_total` is the number that says whether this
+demo is losing data, and it is not readable from a worker.
 
 **It is not free.** Render quoted $21.50 a month in September 2026 for a
-`0.1c-256mb` database and two `0.5c-512mb` services; the checker and dbhealth
-are a third and a fourth on the same plan. There is no free plan for either kind of service,
+`0.1c-256mb` database and two `0.5c-512mb` services; dbhealth is a third on
+the same plan. There is no free plan for either kind of service,
 and `0.5c-512mb` is the smallest a service can be. Render totals the cost on
 the confirmation screen before it creates anything — read it rather than
 trusting the figure above.
 
-The checker and dbhealth are the two resources you can decline. Delete the
-checker from `render.yaml` and the rollups are still correct, because the
-triggers maintain them; you lose the drift check and the backfill. Delete
-dbhealth and nothing about the demo changes; you lose the database's own
-status in control.
+dbhealth is the one resource you can decline. Delete it from `render.yaml`
+and nothing about the demo changes; you lose the database's own status in
+control.
 
 ### Check it worked
 
@@ -427,8 +424,8 @@ seconds after it ends, and the first one is partial.
 - The database is declared with the live demo's settings. A Blueprint entry
   whose name matches an existing resource adopts it and applies them, and
   storage cannot be decreased.
-- All four share a region: the services reach the database over its private
-  network URL.
+- All three services share the database's region: they reach it over its
+  private network URL.
 - dbhealth reads `pg_stat_activity` as the database's own user. If control's
   Collection panel names `pg_read_all_stats`, that user cannot see other
   sessions, and the connection counts are its own; everything else is

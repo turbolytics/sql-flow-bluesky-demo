@@ -1,7 +1,10 @@
 # Render Blueprint: a Postgres, a private service streaming Jetstream into it,
-# a web service serving the rollups over HTTP from the same image, a second
-# private service checking that those rollups match what they are built from,
-# and a third watching the database itself for control.
+# a web service serving the rollups over HTTP from the same image, and a
+# second private service watching the database itself for control.
+#
+# The rollup checker, sqlflow-bluesky-rollups, is not deployed: the triggers
+# maintain the rollups without it, and a service is the cost of one. Run it
+# locally when a new rollup table needs its history: README, "Rollups".
 #
 # Everything the demo needs is declared here, so the Deploy to Render button in
 # the README works in a workspace that has none of it. fromDatabase may
@@ -32,7 +35,7 @@ services:
   # disagreed, Render offered to create a second pipeline beside the live one --
   # both consuming Jetstream, both upserting the same minute -- rather than
   # adopting it. The live service was renamed to the name below; -pipeline,
-  # -api and -rollups now say what each one does.
+  # -api and -dbhealth now say what each one does.
   #
   # pserv rather than worker, and not only to match. A worker cannot open a
   # port, and the engine's /metrics is the only place
@@ -109,51 +112,6 @@ services:
         value: "8080"
       - key: PORT
         value: "8080"
-      - key: SQLFLOW_LOG_LEVEL
-        value: INFO
-
-  # The rollup supervisor. It does not maintain the rollups: the triggers
-  # migrations/0005_rollups.sql installs do that, in the writing transaction,
-  # and they keep doing it whether this service runs or not. What it adds is
-  # everything around the merge -- it backfills history a table is missing,
-  # recomputes every bucket against the table below it on a loop, and reports
-  # what differs. So losing it is not an incident: the numbers stay right and
-  # only the checking stops.
-  #
-  # It adopts what the migrations already built. `rollup install` compares each
-  # table's columns against what rollups.yml declares and records the
-  # declaration in sqlflow_rollup_state; it issues only CREATE IF NOT EXISTS
-  # and CREATE OR REPLACE, so it cannot drop or empty a table that holds
-  # history. A table whose columns disagree aborts the whole transaction and
-  # exits non-zero rather than changing anything.
-  # pserv, like the pipeline: bin/rollups.sh already serves /healthz and
-  # rollup_drift_buckets on :8000, and reporting drift to nowhere is the one
-  # thing this service must not do.
-  - type: pserv
-    name: sqlflow-bluesky-rollups
-    runtime: docker
-    dockerfilePath: ./Dockerfile
-    # Overrides the image's entrypoint, which would start a second pipeline.
-    # bin/rollups.sh applies the migrations first: `rollup install` exits
-    # non-zero when the minute table is not there yet, and nothing orders one
-    # service ahead of another on a first deploy.
-    dockerCommand: /app/bin/rollups.sh
-    # 22 MiB resident measured locally, idle at 0% CPU between passes: the
-    # backfill is chunked and a verify pass reads a few buckets. Far more than
-    # this needs, and also the smallest plan there is -- Render's schema offers
-    # nothing below 0.5c-512mb for a service.
-    plan: 0.5c-512mb
-    # The database's region, for the private connection string.
-    region: virginia
-    # As on the services above.
-    autoDeployTrigger: "off"
-    envVars:
-      # rollups.yml templates store.postgres.dsn from this. Two connections,
-      # leader or standby: one holds the leader lock, one does the work.
-      - key: SQLFLOW_POSTGRES_URI
-        fromDatabase:
-          name: sqlflow-demo-rollups
-          property: connectionString
       - key: SQLFLOW_LOG_LEVEL
         value: INFO
 
